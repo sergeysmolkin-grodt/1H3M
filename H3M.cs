@@ -412,9 +412,12 @@ namespace cAlgo.Robots
             double minDistance = double.MaxValue;
             var h1Bars = _h1Bars;
             var currentPrice = Bars.ClosePrices.Last(0);
+            var today = Server.Time.Date;
             for (int i = 2; i < h1Bars.Count - 2; i++)
             {
                 var barTime = h1Bars.OpenTimes[i];
+                if (barTime.Date != today)
+                    continue;
                 if (!IsInAsiaSession(barTime))
                     continue;
                 if (DetermineTrendContext() == TrendContext.Bullish && !double.IsNaN(_fractals.DownFractal[i]))

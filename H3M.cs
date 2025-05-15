@@ -15,6 +15,8 @@ namespace cAlgo.Robots
         public bool IsSwept { get; set; }
         public double? SweepLevel { get; set; }  // Уровень который привел к свипу
         public double? SweepExtreme { get; set; } // Экстремум бара свипа (low/high)
+        public bool EntryDone { get; set; } // Был ли вход по этому фракталу
+        public int? SweepBarIndex { get; set; } // Индекс бара, который сделал свип
     }
 
     [Robot(AccessRights = AccessRights.None, AddIndicators = true)]
@@ -38,6 +40,9 @@ namespace cAlgo.Robots
         [Parameter("Max RR", DefaultValue = 3.0)]
         public double MaxRR { get; set; }
 
+        [Parameter("Manual Trend Mode", DefaultValue = ManualTrendMode.Auto)]
+        public ManualTrendMode TrendMode { get; set; }
+
         private ExponentialMovingAverage _ema;
         private Fractals _fractals;
         private List<AsianFractal> _asianFractals = new List<AsianFractal>();
@@ -53,8 +58,6 @@ namespace cAlgo.Robots
         private static readonly int FrankfurtEndHour = 10;  // 10:00 UTC+3
         private static readonly int LondonStartHour = 10; // 10:00 UTC+3
         private static readonly int LondonEndHour = 15;   // 15:00 UTC+3
-        // Добавляем флаг для контроля входа по текущему свипу
-        private bool _entryDoneForCurrentSweep = false;
         private DateTime _lastTradeDate = DateTime.MinValue;
 
         protected override void OnStart()
@@ -272,11 +275,12 @@ namespace cAlgo.Robots
             }
         }
 
-        private void EnterPosition(TradeType tradeType, double entryPrice)
+        private void EnterPosition(TradeType tradeType, double entryPrice, AsianFractal fractal)
         {
+            if (fractal.EntryDone) { DebugLog("[DEBUG] Уже был вход по этому фракталу"); return; }
             if (Positions.Find("H3M") != null) { DebugLog("[DEBUG] Уже есть открытая позиция H3M"); return; }
             // Находим последний свипнутый фрактал
-            var lastSweptFractal = _asianFractals.LastOrDefault(f => f.IsSwept && f.SweepLevel.HasValue);
+            var lastSweptFractal = fractal;
             if (lastSweptFractal == null) { DebugLog("[DEBUG] Нет свипнутого фрактала для входа"); return; }
             DebugLog($"[DEBUG] =====ВХОД В ПОЗИЦИЮ===== Попытка входа в {tradeType} позицию после свипа фрактала {lastSweptFractal.Level:F5}");
             DebugLog($"[DEBUG] Уровень свипа: {lastSweptFractal.SweepLevel:F5}, цена входа: {entryPrice:F5}");
@@ -316,8 +320,7 @@ namespace cAlgo.Robots
                 DebugLog($"[DEBUG] Stop Loss: {stopLossPrice} (за фракталом {lastSweptFractal.Level})");
                 DebugLog($"[DEBUG] Take Profit: {takeProfitPrice}");
                 DebugLog($"[DEBUG] Risk/Reward: {rr:F2}");
-                _asianFractals.Clear();
-                _entryDoneForCurrentSweep = true;
+                fractal.EntryDone = true;
                 _lastTradeDate = Server.Time;
             }
             else
@@ -478,6 +481,12 @@ namespace cAlgo.Robots
 
         private TrendContext DetermineTrendContext()
         {
+            // Если выбран ручной режим, возвращаем выбранный тренд
+            if (TrendMode == ManualTrendMode.Bullish)
+                return TrendContext.Bullish;
+            if (TrendMode == ManualTrendMode.Bearish)
+                return TrendContext.Bearish;
+            // Auto — старая логика
             if (_h1Bars == null || _h1Bars.Count < 10) return TrendContext.Neutral;
 
             int last = _h1Bars.Count - 1;
@@ -645,48 +654,43 @@ namespace cAlgo.Robots
             DebugLog($"[DEBUG] === Состояние фракталов после проверки свипа ===");
             foreach (var fractal in _asianFractals)
             {
-                DebugLog($"[DEBUG] Фрактал: {fractal.Level:F5} время: {fractal.Time}, свипнут={fractal.IsSwept}, уровень свипа={fractal.SweepLevel:F5}");
+                DebugLog($"[DEBUG] Фрактал: {fractal.Level:F5} время: {fractal.Time}, свипнут={fractal.IsSwept}, уровень свипа={fractal.SweepLevel:F5}, EntryDone={fractal.EntryDone}");
             }
-            var sweptFractals = _asianFractals.Where(f => f.IsSwept && f.SweepLevel.HasValue).ToList();
-            if (sweptFractals.Any() && !_entryDoneForCurrentSweep)
+            var sweptFractals = _asianFractals.Where(f => f.IsSwept && f.SweepLevel.HasValue && !f.EntryDone).ToList();
+            if (sweptFractals.Any())
             {
                 DebugLog($"[DEBUG] Найдены свипнутые фракталы ({sweptFractals.Count}). Проверка слома структуры на 3м...");
-                var breakResult = Is3mStructureBreak();
-                DebugLog($"[DEBUG] Результат проверки слома структуры: {breakResult.IsBreak}");
-                if (breakResult.IsBreak)
+                foreach (var fractal in sweptFractals)
                 {
-                    DebugLog($"[DEBUG] !!! ОБНАРУЖЕН СЛОМ СТРУКТУРЫ !!! Попытка входа...");
-                    if (trendContext == TrendContext.Bullish)
+                    var breakResult = Is3mStructureBreak(fractal);
+                    DebugLog($"[DEBUG] Результат проверки слома структуры для фрактала {fractal.Level:F5}: {breakResult.IsBreak}");
+                    if (breakResult.IsBreak)
                     {
-                        DebugLog($"[DEBUG] !!! ВХОД В ЛОНГ !!!");
-                        EnterPosition(TradeType.Buy, breakResult.EntryPrice);
-                        _entryDoneForCurrentSweep = true;
-                        _lastTradeDate = Server.Time;
-                    }
-                    else if (trendContext == TrendContext.Bearish)
-                    {
-                        DebugLog($"[DEBUG] !!! ВХОД В ШОРТ !!!");
-                        EnterPosition(TradeType.Sell, breakResult.EntryPrice);
-                        _entryDoneForCurrentSweep = true;
-                        _lastTradeDate = Server.Time;
+                        DebugLog($"[DEBUG] !!! ОБНАРУЖЕН СЛОМ СТРУКТУРЫ !!! Попытка входа...");
+                        if (trendContext == TrendContext.Bullish)
+                        {
+                            DebugLog($"[DEBUG] !!! ВХОД В ЛОНГ !!!");
+                            EnterPosition(TradeType.Buy, breakResult.EntryPrice, fractal);
+                        }
+                        else if (trendContext == TrendContext.Bearish)
+                        {
+                            DebugLog($"[DEBUG] !!! ВХОД В ШОРТ !!!");
+                            EnterPosition(TradeType.Sell, breakResult.EntryPrice, fractal);
+                        }
+                        else
+                        {
+                            DebugLog($"[DEBUG] Нейтральный тренд, вход невозможен");
+                        }
                     }
                     else
                     {
-                        DebugLog($"[DEBUG] Нейтральный тренд, вход невозможен");
+                        DebugLog($"[DEBUG] Слом структуры не обнаружен для фрактала {fractal.Level:F5}");
                     }
                 }
-                else
-                {
-                    DebugLog($"[DEBUG] Слом структуры не обнаружен");
-                }
-            }
-            else if (!_entryDoneForCurrentSweep)
-            {
-                DebugLog($"[DEBUG] Нет свипнутых фракталов, ожидание свипа");
             }
             else
             {
-                DebugLog($"[DEBUG] Вход уже был совершен по текущему свипу, ожидание новой Азии");
+                DebugLog($"[DEBUG] Нет свипнутых фракталов, ожидание свипа");
             }
             DebugLog($"[DEBUG] ======= КОНЕЦ ТИКА ======= {Server.Time} =======");
         }
@@ -699,7 +703,6 @@ namespace cAlgo.Robots
         private void FindAsianSessionFractals()
         {
             _asianFractals.Clear();
-            _entryDoneForCurrentSweep = false;
             var h1Bars = _h1Bars;
             var hourlyFractals = Indicators.Fractals(h1Bars, FractalPeriod);
             var today = Server.Time.Date;
@@ -763,27 +766,15 @@ namespace cAlgo.Robots
             if (_asianFractals.Count == 0) { DebugLog("[DEBUG] Нет фракталов для свипа"); return; }
             var now = Server.Time;
             if (!IsInFrankfurtSession(now) && !IsInLondonSession(now)) { DebugLog("[DEBUG] Не Франкфурт и не Лондон сессия"); return; }
-            
             var currentPrice = Bars.ClosePrices.Last(0);
             var context = SimpleTrendContext();
-            
             DebugLog($"[DEBUG] Проверка свипа фракталов. Найдено фракталов: {_asianFractals.Count}");
-            
-            // Проверяем свип для каждого фрактала, который еще не свипнут
             foreach (var fractal in _asianFractals.Where(f => !f.IsSwept))
             {
                 if (context == TrendContext.Bullish)
                 {
                     double fractalLevel = fractal.Level;
                     DebugLog($"[DEBUG] Проверка свипа нижнего фрактала {fractalLevel:F5} в бычьем тренде");
-                    if (currentPrice > fractalLevel)
-                    {
-                        fractal.IsSwept = true;
-                        fractal.SweepLevel = currentPrice;
-                        fractal.SweepExtreme = Bars.LowPrices.Last(0);
-                        DebugLog($"[DEBUG] Фрактал {fractalLevel:F5} свипнут текущей ценой {currentPrice:F5}, экстремум {fractal.SweepExtreme:F5}");
-                        continue;
-                    }
                     for (int i = 0; i < Math.Min(1000, _m3Bars.Count); i++)
                     {
                         var barTime = _m3Bars.OpenTimes.Last(i);
@@ -794,7 +785,8 @@ namespace cAlgo.Robots
                                 fractal.IsSwept = true;
                                 fractal.SweepLevel = _m3Bars.HighPrices.Last(i);
                                 fractal.SweepExtreme = _m3Bars.LowPrices.Last(i);
-                                DebugLog($"[DEBUG] Найден исторический свип фрактала {fractalLevel:F5} на баре {i}, время {barTime}, свип-уровень: {fractal.SweepLevel:F5}, экстремум: {fractal.SweepExtreme:F5}");
+                                fractal.SweepBarIndex = _m3Bars.Count - 1 - i;
+                                DebugLog($"[DEBUG] Найден исторический свип фрактала {fractalLevel:F5} на баре {i}, время {barTime}, свип-уровень: {fractal.SweepLevel:F5}, экстремум: {fractal.SweepExtreme:F5}, sweepBarIndex: {fractal.SweepBarIndex}");
                                 break;
                             }
                         }
@@ -804,14 +796,6 @@ namespace cAlgo.Robots
                 {
                     double fractalLevel = fractal.Level;
                     DebugLog($"[DEBUG] Проверка свипа верхнего фрактала {fractalLevel:F5} в медвежьем тренде");
-                    if (currentPrice < fractalLevel)
-                    {
-                        fractal.IsSwept = true;
-                        fractal.SweepLevel = currentPrice;
-                        fractal.SweepExtreme = Bars.HighPrices.Last(0);
-                        DebugLog($"[DEBUG] Фрактал {fractalLevel:F5} свипнут текущей ценой {currentPrice:F5}, экстремум {fractal.SweepExtreme:F5}");
-                        continue;
-                    }
                     for (int i = 0; i < Math.Min(1000, _m3Bars.Count); i++)
                     {
                         var barTime = _m3Bars.OpenTimes.Last(i);
@@ -822,21 +806,20 @@ namespace cAlgo.Robots
                                 fractal.IsSwept = true;
                                 fractal.SweepLevel = _m3Bars.LowPrices.Last(i);
                                 fractal.SweepExtreme = _m3Bars.HighPrices.Last(i);
-                                DebugLog($"[DEBUG] Найден исторический свип фрактала {fractalLevel:F5} на баре {i}, время {barTime}, свип-уровень: {fractal.SweepLevel:F5}, экстремум: {fractal.SweepExtreme:F5}");
+                                fractal.SweepBarIndex = _m3Bars.Count - 1 - i;
+                                DebugLog($"[DEBUG] Найден исторический свип фрактала {fractalLevel:F5} на баре {i}, время {barTime}, свип-уровень: {fractal.SweepLevel:F5}, экстремум: {fractal.SweepExtreme:F5}, sweepBarIndex: {fractal.SweepBarIndex}");
                                 break;
                             }
                         }
                     }
                 }
             }
-            
-            // Выводим статус всех фракталов после проверки свипа
             if (_asianFractals.Any())
             {
                 DebugLog($"[DEBUG] Статус фракталов после проверки свипа:");
                 foreach (var fractal in _asianFractals)
                 {
-                    DebugLog($"[DEBUG] Фрактал: {fractal.Level:F5}, время: {fractal.Time}, свипнут: {fractal.IsSwept}, свип-уровень: {fractal.SweepLevel?.ToString("F5") ?? "N/A"}, экстремум: {fractal.SweepExtreme?.ToString("F5") ?? "N/A"}");
+                    DebugLog($"[DEBUG] Фрактал: {fractal.Level:F5}, время: {fractal.Time}, свипнут: {fractal.IsSwept}, свип-уровень: {fractal.SweepLevel?.ToString("F5") ?? "N/A"}, экстремум: {fractal.SweepExtreme?.ToString("F5") ?? "N/A"}, sweepBarIndex: {fractal.SweepBarIndex}");
                 }
             }
         }
@@ -847,132 +830,46 @@ namespace cAlgo.Robots
             public double EntryPrice { get; set; }
         }
 
-        private StructureBreakResult Is3mStructureBreak()
+        private StructureBreakResult Is3mStructureBreak(AsianFractal fractal)
         {
-            var sweptFractals = _asianFractals.Where(f => f.IsSwept && f.SweepLevel.HasValue).ToList();
-            if (!sweptFractals.Any()) { DebugLog("[DEBUG] Нет свипнутых фракталов для проверки слома"); return new StructureBreakResult { IsBreak = false }; }
-            
+            if (fractal == null || !fractal.IsSwept || !fractal.SweepLevel.HasValue || !fractal.SweepExtreme.HasValue || !fractal.SweepBarIndex.HasValue) { DebugLog("[DEBUG] Нет свипнутого фрактала для проверки слома"); return new StructureBreakResult { IsBreak = false }; }
             var m3 = _m3Bars;
             if (m3.Count < 10) return new StructureBreakResult { IsBreak = false };
-            
             var context = SimpleTrendContext();
             if (context == TrendContext.Neutral) { DebugLog("[DEBUG] Тренд нейтральный, слом не проверяем"); return new StructureBreakResult { IsBreak = false }; }
-            
-            DebugLog($"[DEBUG] Анализ слома структуры для {sweptFractals.Count} свипнутых фракталов");
-            
-            // Находим все бары в сессию Франкфурта/Лондона
-            var sessionBars = new List<(int index, DateTime time, double open, double close, double high, double low)>();
-            
-            // Собираем все бары за нужные сессии и сортируем их по времени (от самых ранних)
-            for (int i = Math.Min(800, m3.Count-1); i >= 0; i--)
+            double sweepExtreme = fractal.SweepExtreme.Value;
+            int sweepBarIndex = fractal.SweepBarIndex.Value;
+            int barsToCheck = 2; // Проверяем только 2 бара после свипа
+            DebugLog($"[DEBUG] sweepBarIndex={sweepBarIndex}, sweepExtreme={sweepExtreme}, sweepLevel={fractal.SweepLevel}, sweepTime={m3.OpenTimes[sweepBarIndex]}");
+            for (int i = 1; i <= barsToCheck; i++)
             {
-                var barTime = m3.OpenTimes[i];
-                
-                // Проверяем только бары во время Франкфурта и Лондона
-                if (IsInFrankfurtSession(barTime) || IsInLondonSession(barTime))
+                int idx = sweepBarIndex + i;
+                if (idx >= m3.Count) break;
+                var barTime = m3.OpenTimes[idx];
+                if (!(IsInFrankfurtSession(barTime) || IsInLondonSession(barTime))) continue;
+                double open = m3.OpenPrices[idx];
+                double close = m3.ClosePrices[idx];
+                double bodySize = Math.Abs(close - open);
+                bool isSignificantBar = bodySize > Symbol.PipSize * 2;
+                DebugLog($"[DEBUG] Проверка бара idx={idx}, время={barTime}, open={open}, close={close}, sweepExtreme={sweepExtreme}, isSignificantBar={isSignificantBar}");
+                if (context == TrendContext.Bullish)
                 {
-                    sessionBars.Add((
-                        i, 
-                        barTime,
-                        m3.OpenPrices[i],
-                        m3.ClosePrices[i],
-                        m3.HighPrices[i],
-                        m3.LowPrices[i]
-                    ));
+                    if (open <= sweepExtreme && close > sweepExtreme && isSignificantBar)
+                    {
+                        DebugLog($"[DEBUG] НАЙДЕН СЛОМ СТРУКТУРЫ для ЛОНГА над экстремумом {sweepExtreme:F5} на баре {idx}: время={barTime}");
+                        return new StructureBreakResult { IsBreak = true, EntryPrice = close };
+                    }
                 }
-            }
-            
-            // Сортируем бары по времени (сначала самые ранние)
-            sessionBars = sessionBars.OrderBy(b => b.time).ToList();
-            
-            // Проверяем слом структуры на каждом фрактале
-            foreach (var fractal in sweptFractals)
-            {
-                if (!fractal.SweepLevel.HasValue || !fractal.SweepExtreme.HasValue) continue;
-                
-                double sweepLevel = fractal.SweepLevel.Value;
-                double sweepExtreme = fractal.SweepExtreme.Value;
-                DebugLog($"[DEBUG] Проверка слома для фрактала {fractal.Level:F5}, уровень свипа: {sweepLevel:F5}, экстремум: {sweepExtreme:F5}");
-                
-                // Проверяем каждый бар на слом структуры относительно уровня свипа
-                foreach (var bar in sessionBars)
+                else if (context == TrendContext.Bearish)
                 {
-                    double bodySize = Math.Abs(bar.close - bar.open);
-                    bool isSignificantBar = bodySize > Symbol.PipSize * 2;
-                    
-                    // Логируем каждый 10-й бар или первые/последние 20 баров
-                    if (sessionBars.IndexOf(bar) % 10 == 0 || 
-                        sessionBars.IndexOf(bar) < 20 || 
-                        sessionBars.Count - sessionBars.IndexOf(bar) <= 20)
+                    if (open >= sweepExtreme && close < sweepExtreme && isSignificantBar)
                     {
-                        DebugLog($"[DEBUG] Анализ бара {bar.index}, время {bar.time}, O={bar.open:F5}, C={bar.close:F5}, тело={bodySize/Symbol.PipSize:F1} пипсов");
-                    }
-                    
-                    if (context == TrendContext.Bullish)
-                    {
-                        // Закрепление телом над sweepExtreme
-                        if (bar.open <= sweepExtreme && bar.close > sweepExtreme && isSignificantBar)
-                        {
-                            DebugLog($"[DEBUG] НАЙДЕН СЛОМ СТРУКТУРЫ для ЛОНГА над экстремумом {sweepExtreme:F5} на баре {bar.index}: время={bar.time}");
-                            return new StructureBreakResult { IsBreak = true, EntryPrice = bar.close };
-                        }
-                    }
-                    else if (context == TrendContext.Bearish)
-                    {
-                        // Закрепление телом под sweepExtreme
-                        if (bar.open >= sweepExtreme && bar.close < sweepExtreme && isSignificantBar)
-                        {
-                            DebugLog($"[DEBUG] НАЙДЕН СЛОМ СТРУКТУРЫ для ШОРТА под экстремумом {sweepExtreme:F5} на баре {bar.index}: время={bar.time}");
-                            return new StructureBreakResult { IsBreak = true, EntryPrice = bar.close };
-                        }
+                        DebugLog($"[DEBUG] НАЙДЕН СЛОМ СТРУКТУРЫ для ШОРТА под экстремумом {sweepExtreme:F5} на баре {idx}: время={barTime}");
+                        return new StructureBreakResult { IsBreak = true, EntryPrice = close };
                     }
                 }
             }
-            
-            // Если не найден слом в исторических барах, проверяем текущий бар
-            int lastIndex = m3.Count - 1;
-            var lastBar = new {
-                Time = m3.OpenTimes[lastIndex],
-                Open = m3.OpenPrices[lastIndex],
-                Close = m3.ClosePrices[lastIndex],
-                High = m3.HighPrices[lastIndex],
-                Low = m3.LowPrices[lastIndex]
-            };
-            
-            if (IsInFrankfurtSession(lastBar.Time) || IsInLondonSession(lastBar.Time))
-            {
-                double lastBodySize = Math.Abs(lastBar.Close - lastBar.Open);
-                bool isSignificantBar = lastBodySize > Symbol.PipSize * 2;
-                
-                DebugLog($"[DEBUG] Проверка текущего бара: время={lastBar.Time}, O={lastBar.Open:F5}, C={lastBar.Close:F5}, тело={lastBodySize/Symbol.PipSize:F1} пипсов");
-                
-                foreach (var fractal in sweptFractals)
-                {
-                    if (!fractal.SweepLevel.HasValue || !fractal.SweepExtreme.HasValue) continue;
-                    
-                    double sweepLevel = fractal.SweepLevel.Value;
-                    double sweepExtreme = fractal.SweepExtreme.Value;
-                    
-                    if (context == TrendContext.Bullish)
-                    {
-                        if (lastBar.Open <= sweepExtreme && lastBar.Close > sweepExtreme && isSignificantBar)
-                        {
-                            DebugLog($"[DEBUG] НАЙДЕН СЛОМ СТРУКТУРЫ для ЛОНГА над экстремумом {sweepExtreme:F5} на текущем баре: время={lastBar.Time}");
-                            return new StructureBreakResult { IsBreak = true, EntryPrice = lastBar.Close };
-                        }
-                    }
-                    else if (context == TrendContext.Bearish)
-                    {
-                        if (lastBar.Open >= sweepExtreme && lastBar.Close < sweepExtreme && isSignificantBar)
-                        {
-                            DebugLog($"[DEBUG] НАЙДЕН СЛОМ СТРУКТУРЫ для ШОРТА под экстремумом {sweepExtreme:F5} на текущем баре: время={lastBar.Time}");
-                            return new StructureBreakResult { IsBreak = true, EntryPrice = lastBar.Close };
-                        }
-                    }
-                }
-            }
-            
-            DebugLog("[DEBUG] Слом структуры не обнаружен");
+            DebugLog("[DEBUG] Слом структуры не обнаружен в ближайших барах после свипа");
             return new StructureBreakResult { IsBreak = false };
         }
 
@@ -1051,5 +948,12 @@ namespace cAlgo.Robots
         Bullish,
         Bearish,
         Neutral
+    }
+
+    public enum ManualTrendMode
+    {
+        Auto,
+        Bullish,
+        Bearish
     }
 } 

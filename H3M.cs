@@ -347,7 +347,7 @@ namespace cAlgo.Robots
             DebugLog($"[DEBUG] =====ВХОД В ПОЗИЦИЮ===== Попытка входа в {tradeType} позицию после свипа фрактала {lastSweptFractal.Level:F5} ({lastSweptFractal.Time})");
             DebugLog($"[DEBUG] Азиатский фрактал: {lastSweptFractal.Level:F5}, Экстремум M3 бара свипа: {lastSweptFractal.SweepExtreme.Value:F5}, Цена входа (BOS): {entryPrice:F5}");
             
-            // Стоп-лосс размещается за ееэкстремумом M3 бара, котоерый совершил свип азиатского фрактала
+            // Стоп-лосс размещается за ееэкстремумом M3 бара, котогерый совершил свип азиатского фрактала
             var stopLossPrice = CalculateStopLoss(tradeType, lastSweptFractal.SweepExtreme.Value); 
             
             var (takeProfitPrice, rr) = CalculateTakeProfit(tradeType, entryPrice, stopLossPrice);

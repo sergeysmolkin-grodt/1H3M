@@ -353,9 +353,7 @@ namespace cAlgo.Robots
             var (takeProfitPrice, rr) = CalculateTakeProfit(tradeType, entryPrice, stopLossPrice);
             
             // --- Логирование для 14.05.2025 ---
-            if (Server.Time.Date == new DateTime(2025, 5, 14) && 
-                Math.Abs(fractal.Level - 1.11832) < Symbol.PipSize * 0.5 && 
-                Math.Abs(entryPrice - 1.11913) < Symbol.PipSize * 2) // Допуск для цены входа побольше
+            if (Server.Time.Date == new DateTime(2025, 5, 14))
             {
                 DebugLog($"[USER_TARGET_LOG 14.05.2025] EnterPosition для азиатского фрактала ~1.11832, вход ~1.11913:");
                 DebugLog($"    > Бот: SL={stopLossPrice:F5}, TP={takeProfitPrice?.ToString("F5") ?? "N/A"}, RR={rr:F2}");
@@ -422,11 +420,10 @@ namespace cAlgo.Robots
 
         private bool IsLondonOrFrankfurtSession(DateTime time)
         {
-            var hour = time.Hour;
-            
-            // London: 08:00 - 16:00 UTC
-            // Frankfurt: 07:00 - 15:00 UTC
-            return hour >= 7 && hour < 16;
+            // Frankfurt: 09:00-10:00 UTC+3
+            // London:    10:00-15:00 UTC+3
+            // Assumes 'time' parameter is UTC+3
+            return IsInFrankfurtSession(time) || IsInLondonSession(time);
         }
 
         private void CheckAsianSession()
@@ -705,28 +702,17 @@ namespace cAlgo.Robots
         {
             var time = Server.Time;
 
-            // Specific logging logic for 14.05.2025
             if (time.Date == new DateTime(2025, 5, 14))
             {
                 // Always log messages containing specific markers for 14.05.2025 debugging
                 if (message.Contains("[DEBUG 14.05.2025]") || message.Contains("[USER_TARGET_LOG 14.05.2025]"))
                 {
                     Print(message);
-                    return; // Message logged, exit
                 }
-
-                // For other messages on this date, restrict to a key event window
-                // Window: 08:55 to 09:30 UTC+3 for 14.05.2025
-                var startEventWindow = new DateTime(time.Year, time.Month, time.Day, 9, 18, 0); 
-                var endEventWindow = new DateTime(time.Year, time.Month, time.Day, 9, 18, 0);   
-                if (time >= startEventWindow && time <= endEventWindow)
-                {
-                    Print(message);
-                }
+                // All other (non-marked) DebugLog calls on 14.05.2025 will be suppressed.
+                return; 
             }
-            // On other dates, DebugLog will do nothing by default, reducing log volume.
-            // If general logging for other dates is needed in the future,
-            // an 'else' block could be added here with different conditions.
+            // On other dates, DebugLog will do nothing by default.
         }
 
         protected override void OnTick()
@@ -749,18 +735,6 @@ namespace cAlgo.Robots
             DebugLog($"[DEBUG] ======= НОВЫЙ ТИК ======= {Server.Time} =======");
             DebugLog($"[DEBUG] Текущий тренд: {trendContext}, цена = {currentPrice:F5}, время = {Server.Time}");
             
-            // --- Лог ожидаемого сценария от пользователя для 14.05.2025 ---
-            if (Server.Time.Date == new DateTime(2025, 5, 14) && Server.Time.Hour == 8 && Server.Time.Minute == 50) // Выводим один раз в начале дня
-            {
-                Print("[USER_EXPECTED_SCENARIO_14.05.2025] Ожидаемая сделка:");
-                Print("    Фрактал 1 (Азия H1): ~1.11822 (бот использует 1.11822 или близкий)");
-                Print("    Свип фрактала 1: в ~09:03 UTC+3 (M3 Low < уровня фрактала)");
-                Print("    Слом структуры (BOS): M3 свеча закрывается выше High M3-бара свипа в ~09:15 UTC+3");
-                Print("    Вход Long: ~1.11913");
-                Print("    Stop Loss: ~1.11806");
-                Print("    Take Profit: ~1.12360");
-            }
-            // --- Конец лога ожидаемого сценария ---
 
             DebugLog($"[DEBUG] Настройки: MinRR={MinRR:F2}, MaxRR={MaxRR:F2}");
             
@@ -882,34 +856,57 @@ namespace cAlgo.Robots
 
             bool anyFractalSweptThisTick = false;
 
+            // --- НАЧАЛО: Сброс состояния свипа до начала европейских сессий ---
+            if (Server.Time.Hour < 9) // Если еще не 09:00 (начало Франкфурта)
+            {
+                foreach (var fractalToReset in _asianFractals.Where(f => f.IsSwept && f.Time.Date == Server.Time.Date))
+                {
+                    DebugLog($"[DEBUG 14.05.2025] RESETTING Early Sweep State for Fractal {fractalToReset.Level:F5} @ {fractalToReset.Time}. Server.Time: {Server.Time:HH:mm:ss}");
+                    fractalToReset.IsSwept = false;
+                    fractalToReset.SweepLevel = null;
+                    fractalToReset.SweepExtreme = null;
+                    fractalToReset.SweepBarIndex = null;
+                    // LastBosCheckBarIndex не сбрасываем здесь, т.к. он связан с уже проверенными барами для BOS
+                }
+            }
+            // --- КОНЕЦ: Сброс состояния свипа ---
+
             foreach (var fractal in _asianFractals.Where(f => !f.EntryDone)) // Проверяем только те, по которым не было входа
             {
+                // Убедимся, что свип и последующий BOS рассматриваются только в разрешенные сессии и в день фрактала
+                bool canProcessSweep = IsLondonOrFrankfurtSession(Server.Time) && Server.Time.Date == fractal.Time.Date;
+
                 // Проверка мгновенного свипа текущей ценой
-                if (trendContext == TrendContext.Bullish && Symbol.Bid < fractal.Level)
+                if (canProcessSweep && !fractal.IsSwept) // Только если еще не свипнут И текущее время в сессии
                 {
-                    fractal.IsSwept = true;
-                    fractal.SweepLevel = Symbol.Bid;
-                    fractal.SweepExtreme = Symbol.Bid; 
-                    fractal.SweepBarIndex = _m3Bars.Count -1; 
-                    fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; // Инициализация
-                    anyFractalSweptThisTick = true;
-                    DebugLog($"[DEBUG] Мгновенный СВИП фрактала {fractal.Level:F5} в {fractal.Time} текущей ценой {Symbol.Bid:F5}. SweepExtreme установлен {fractal.SweepExtreme:F5}");
-                }
-                else if (trendContext == TrendContext.Bearish && Symbol.Ask > fractal.Level)
-                {
-                    fractal.IsSwept = true;
-                    fractal.SweepLevel = Symbol.Ask;
-                    fractal.SweepExtreme = Symbol.Ask; 
-                    fractal.SweepBarIndex = _m3Bars.Count -1; 
-                    fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; // Инициализация
-                    anyFractalSweptThisTick = true;
-                    DebugLog($"[DEBUG] Мгновенный СВИП фрактала {fractal.Level:F5} в {fractal.Time} текущей ценой {Symbol.Ask:F5}. SweepExtreme установлен {fractal.SweepExtreme:F5}");
+                    if (trendContext == TrendContext.Bullish && Symbol.Bid < fractal.Level)
+                    {
+                        fractal.IsSwept = true;
+                        fractal.SweepLevel = Symbol.Bid;
+                        fractal.SweepExtreme = Symbol.Bid; 
+                        fractal.SweepBarIndex = _m3Bars.Count -1; 
+                        DebugLog($"[DEBUG 14.05.2025] INSTANT Bullish Sweep SET: Fractal {fractal.Level:F5} @ {fractal.Time}, SweepBarIndex: {fractal.SweepBarIndex.Value}, SweepExtreme: {fractal.SweepExtreme.Value:F5}, Server.Time: {Server.Time:HH:mm:ss}");
+                        fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; 
+                        anyFractalSweptThisTick = true;
+                        DebugLog($"[DEBUG] Мгновенный СВИП (в сессии) фрактала {fractal.Level:F5} в {fractal.Time} текущей ценой {Symbol.Bid:F5}. SweepExtreme установлен {fractal.SweepExtreme:F5}");
+                    }
+                    else if (trendContext == TrendContext.Bearish && Symbol.Ask > fractal.Level)
+                    {
+                        fractal.IsSwept = true;
+                        fractal.SweepLevel = Symbol.Ask;
+                        fractal.SweepExtreme = Symbol.Ask; 
+                        fractal.SweepBarIndex = _m3Bars.Count -1; 
+                        DebugLog($"[DEBUG 14.05.2025] INSTANT Bearish Sweep SET: Fractal {fractal.Level:F5} @ {fractal.Time}, SweepBarIndex: {fractal.SweepBarIndex.Value}, SweepExtreme: {fractal.SweepExtreme.Value:F5}, Server.Time: {Server.Time:HH:mm:ss}");
+                        fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value;
+                        anyFractalSweptThisTick = true;
+                        DebugLog($"[DEBUG] Мгновенный СВИП (в сессии) фрактала {fractal.Level:F5} в {fractal.Time} текущей ценой {Symbol.Ask:F5}. SweepExtreme установлен {fractal.SweepExtreme:F5}");
+                    }
                 }
 
-                // Если уже свипнут (мгновенно или на предыдущем тике), но еще не было входа
-                if (fractal.IsSwept && !fractal.EntryDone)
+                // Если уже свипнут (в правильной сессии) и не было входа
+                if (fractal.IsSwept && Server.Time.Date == fractal.Time.Date && !fractal.EntryDone) // Добавил Server.Time.Date == fractal.Time.Date для явности
                 {
-                    // Проверяем BOS
+                    // Проверяем BOS - Is3mStructureBreak уже содержит проверку сессии для бара BOS
                     var bosResult = Is3mStructureBreak(fractal, trendContext);
                     if (bosResult.IsBreak)
                     {
@@ -950,47 +947,48 @@ namespace cAlgo.Robots
                         }
                         // --- Конец логирования для отладки ---
 
-                        if (!(isBarInAllowedSession && isBarOnFractalDate)) // Пропускаем бары не в сессии или не в день фрактала
-                        {
-                            //if (i < 5 && Server.Time.Date == new DateTime(2025,5,14)) DebugLog($"[DEBUG] Ист. свип: Бар {barTime} пропущен. Sess: {isBarInAllowedSession}, DateOk: {isBarOnFractalDate}");
-                            continue;
-                        }
-                        
-                        // Логирование M3 баров для свипа фрактала 1.11822 в районе 09:00-09:05 14.05.2025
+                        // Восстанавливаем объявление shouldLogDetail
                         bool shouldLogDetail = Server.Time.Date == new DateTime(2025, 5, 14) &&
-                                            fractal.Level == 1.11822 && // Конкретный фрактал
-                                            Server.Time.Hour == 9 && (Server.Time.Minute >= 0 && Server.Time.Minute <= 10); // Время сервера (тика)
-
-                        if (shouldLogDetail && i < 5) // Логируем только 5 последних M3 баров для краткости
+                                              Server.Time.Hour == 9 && (Server.Time.Minute >= 0 && Server.Time.Minute <= 10); // Время сервера (тика)
+                        
+                        if (isBarInAllowedSession && isBarOnFractalDate) // Пропускаем бары не в сессии или не в день фрактала
                         {
-                            Print($"[DETAIL_SWEEP_LOG {barTime:dd.MM.yyyy HH:mm:ss}] M3 Bar [{barM3Index}] O:{_m3Bars.OpenPrices.Last(i):F5} H:{m3High:F5} L:{m3Low:F5} C:{_m3Bars.ClosePrices.Last(i):F5}. Fractal Level: {fractal.Level:F5}. InFrankfurt: {IsInFrankfurtSession(barTime)}, InLondon: {IsInLondonSession(barTime)}");
-                        }
+                            // Логирование M3 баров для свипа фрактала 1.11822 в районе 09:00-09:05 14.05.2025
+                            if (shouldLogDetail && i < 5) // Логируем только 5 последних M3 баров для краткости
+                            {
+                                Print($"[DETAIL_SWEEP_LOG {barTime:dd.MM.yyyy HH:mm:ss}] M3 Bar [{barM3Index}] O:{_m3Bars.OpenPrices.Last(i):F5} H:{m3High:F5} L:{m3Low:F5} C:{_m3Bars.ClosePrices.Last(i):F5}. Fractal Level: {fractal.Level:F5}. InFrankfurt: {IsInFrankfurtSession(barTime)}, InLondon: {IsInLondonSession(barTime)}");
+                            }
 
-                        if (trendContext == TrendContext.Bullish && m3Low < fractal.Level)
-                        {
-                            if (shouldLogDetail) Print($"[SWEEP_CHECK_VALUES ServerT:{Server.Time:HH:mm:ss} M3BarOpenT:{barTime:HH:mm:ss}] m3Low={m3Low:F5}, fractalLevel={fractal.Level:F5}, ConditionMet?=True");
-                            
-                            fractal.IsSwept = true;
-                            fractal.SweepLevel = m3Low;
-                            fractal.SweepExtreme = m3Low; 
-                            fractal.SweepBarIndex = barM3Index;
-                            fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; // Инициализация
-                            anyFractalSweptThisTick = true;
-                            DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (Low={m3Low:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
-                            break; 
-                        }
-                        else if (trendContext == TrendContext.Bearish && m3High > fractal.Level)
-                        {
-                            if (shouldLogDetail) Print($"[SWEEP_CHECK_VALUES ServerT:{Server.Time:HH:mm:ss} M3BarOpenT:{barTime:HH:mm:ss}] m3High={m3High:F5}, fractalLevel={fractal.Level:F5}, ConditionMet?=True");
+                            if (trendContext == TrendContext.Bullish && m3Low < fractal.Level)
+                            {
+                                // Используем shouldLogDetail, если необходимо детализированное Print
+                                if (shouldLogDetail && Server.Time.Date == new DateTime(2025, 5, 14) && Math.Abs(fractal.Level - 1.11822) < Symbol.PipSize * 0.1) Print($"[SWEEP_CHECK_VALUES_DEBUG] HISTORICAL Bullish Sweep Check PASSED Session/Date: Fractal {fractal.Level:F5}, M3BarTime: {barTime:HH:mm:ss}, M3Low: {m3Low:F5}");
+                                
+                                fractal.IsSwept = true;
+                                fractal.SweepLevel = m3Low;
+                                fractal.SweepExtreme = m3Low; 
+                                fractal.SweepBarIndex = barM3Index;
+                                DebugLog($"[DEBUG 14.05.2025] HISTORICAL Bullish Sweep SET: Fractal {fractal.Level:F5} @ {fractal.Time}, SweepBarIndex: {fractal.SweepBarIndex.Value}, M3BarTime: {barTime:HH:mm:ss}, M3BarLow: {m3Low:F5}");
+                                fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; 
+                                anyFractalSweptThisTick = true;
+                                //DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (Low={m3Low:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
+                                break; 
+                            }
+                            else if (trendContext == TrendContext.Bearish && m3High > fractal.Level)
+                            {
+                                // Используем shouldLogDetail, если необходимо детализированное Print
+                                if (shouldLogDetail && Server.Time.Date == new DateTime(2025, 5, 14) && Math.Abs(fractal.Level - 1.11822) < Symbol.PipSize * 0.1) Print($"[SWEEP_CHECK_VALUES_DEBUG] HISTORICAL Bearish Sweep Check PASSED Session/Date: Fractal {fractal.Level:F5}, M3BarTime: {barTime:HH:mm:ss}, M3High: {m3High:F5}");
 
-                            fractal.IsSwept = true;
-                            fractal.SweepLevel = m3High;
-                            fractal.SweepExtreme = m3High; 
-                            fractal.SweepBarIndex = barM3Index;
-                            fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; // Инициализация
-                            anyFractalSweptThisTick = true;
-                            DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (High={m3High:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
-                            break; 
+                                fractal.IsSwept = true;
+                                fractal.SweepLevel = m3High;
+                                fractal.SweepExtreme = m3High; 
+                                fractal.SweepBarIndex = barM3Index;
+                                DebugLog($"[DEBUG 14.05.2025] HISTORICAL Bearish Sweep SET: Fractal {fractal.Level:F5} @ {fractal.Time}, SweepBarIndex: {fractal.SweepBarIndex.Value}, M3BarTime: {barTime:HH:mm:ss}, M3BarHigh: {m3High:F5}");
+                                fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; 
+                                anyFractalSweptThisTick = true;
+                                //DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (High={m3High:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
+                                break; 
+                            }
                         }
                         else
                         {
@@ -1083,11 +1081,38 @@ namespace cAlgo.Robots
             // Итерируем M3 бары НАЧИНАЯ СО СЛЕДУЮЩЕГО после бара, который сделал свип
             for (int barIndexOffset = startBarToAnalyze; barIndexOffset < m3.Count; barIndexOffset++)
             {
-                var barTime = m3.OpenTimes[barIndexOffset];
+                var barTime = m3.OpenTimes[barIndexOffset]; // Это время открытия бара-кандидата на BOS
                 var close = m3.ClosePrices[barIndexOffset];
                 var high = m3.HighPrices[barIndexOffset];
                 var low = m3.LowPrices[barIndexOffset];
                 // var sweepExtremeLevel = fractal.SweepExtreme.Value; // Это для SL
+
+                // --- НАЧАЛО: Детальное логирование OHLC для целевого сценария ---
+                if (Server.Time.Date == new DateTime(2025, 5, 14) &&
+                    fractal.SweepBarIndex.HasValue && // Убедимся, что индекс бара свипа установлен
+                    Math.Abs(fractal.Level - 1.11822) < Symbol.PipSize * 2.0) // Приближение для уровня фрактала
+                {
+                    var sweepBarOpenTime = m3.OpenTimes[fractal.SweepBarIndex.Value];
+                    var bosCandidateBarOpenTime = barTime; // barTime - это m3.OpenTimes[barIndexOffset]
+
+                    // Логируем, если кандидат на BOS находится в интересующем нас временном окне (например, 09:00 - 09:20)
+                    if (bosCandidateBarOpenTime.Hour == 9 && bosCandidateBarOpenTime.Minute >= 0 && bosCandidateBarOpenTime.Minute <= 20)
+                    {
+                        Print($"[USER_TARGET_LOG 14.05.2025] OHLC Data Check (Fractal: {fractal.Level:F5})");
+                        Print($"    Sweep Bar (Index {fractal.SweepBarIndex.Value}, Time {sweepBarOpenTime:HH:mm}): " +
+                              $"O={m3.OpenPrices[fractal.SweepBarIndex.Value]:F5}, " +
+                              $"H={m3.HighPrices[fractal.SweepBarIndex.Value]:F5}, " +
+                              $"L={m3.LowPrices[fractal.SweepBarIndex.Value]:F5}, " +
+                              $"C={m3.ClosePrices[fractal.SweepBarIndex.Value]:F5}");
+                        Print($"    BOS Candidate Bar (Index {barIndexOffset}, Time {bosCandidateBarOpenTime:HH:mm}): " +
+                              $"O={m3.OpenPrices[barIndexOffset]:F5}, " +
+                              $"H={m3.HighPrices[barIndexOffset]:F5}, " +
+                              $"L={m3.LowPrices[barIndexOffset]:F5}, " +
+                              $"C={m3.ClosePrices[barIndexOffset]:F5}");
+                        Print($"    Calculated levelToBreak for this BOS check: {m3.HighPrices[fractal.SweepBarIndex.Value]:F5}");
+                    }
+                }
+                // --- КОНЕЦ: Детальное логирование OHLC ---
 
                 // Обновляем LastBosCheckBarIndex на текущий обрабатываемый бар *перед* любыми continue или return.
                 // Это гарантирует, что этот бар не будет повторно обработан для этого фрактала в последующих вызовах.

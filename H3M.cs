@@ -194,7 +194,7 @@ namespace cAlgo.Robots
             return nearestLevel;
         }
 
-        // --- Find next H1 fractal after the nearest one ---
+        // --- Find next H1 frкactal after the nearest one ---
         private double? TryFindNextH1Fractal(TradeType tradeType, double entryPrice, double firstFractalLevel)
         {
             double? nextLevel = null;

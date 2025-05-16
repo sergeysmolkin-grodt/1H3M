@@ -976,8 +976,7 @@ namespace cAlgo.Robots
                             fractal.SweepBarIndex = barM3Index;
                             fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; // Инициализация
                             anyFractalSweptThisTick = true;
-                            //DdebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (Low={m3Low:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
-                            DebugLog($"[USER_TARGET_LOG 14.05.2025 SWEEP_INFO] Bullish H1_Fractal: {fractal.Level:F5} @ {fractal.Time:dd.MM.yyyy HH:mm}. M3_SweepBar_Time: {barTime:dd.MM.yyyy HH:mm:ss}, M3_SweepBar_Index: {barM3Index}. M3_O:{_m3Bars.OpenPrices[barM3Index]:F5}, H:{_m3Bars.HighPrices[barM3Index]:F5}, L:{_m3Bars.LowPrices[barM3Index]:F5}, C:{_m3Bars.ClosePrices[barM3Index]:F5}. SL_Extreme_Set_To: {fractal.SweepExtreme:F5}. BOS_Level_To_Break (SweepBarHigh): {_m3Bars.HighPrices[barM3Index]:F5}");
+                            DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (Low={m3Low:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
                             break; 
                         }
                         else if (trendContext == TrendContext.Bearish && m3High > fractal.Level)
@@ -990,8 +989,7 @@ namespace cAlgo.Robots
                             fractal.SweepBarIndex = barM3Index;
                             fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; // Инициализация
                             anyFractalSweptThisTick = true;
-                            //DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (High={m3High:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
-                            DebugLog($"[USER_TARGET_LOG 14.05.2025 SWEEP_INFO] Bearish H1_Fractal: {fractal.Level:F5} @ {fractal.Time:dd.MM.yyyy HH:mm}. M3_SweepBar_Time: {barTime:dd.MM.yyyy HH:mm:ss}, M3_SweepBar_Index: {barM3Index}. M3_O:{_m3Bars.OpenPrices[barM3Index]:F5}, H:{_m3Bars.HighPrices[barM3Index]:F5}, L:{_m3Bars.LowPrices[barM3Index]:F5}, C:{_m3Bars.ClosePrices[barM3Index]:F5}. SL_Extreme_Set_To: {fractal.SweepExtreme:F5}. BOS_Level_To_Break (SweepBarLow): {_m3Bars.LowPrices[barM3Index]:F5}");
+                            DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (High={m3High:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
                             break; 
                         }
                         else

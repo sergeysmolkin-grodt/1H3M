@@ -73,9 +73,77 @@ namespace cAlgo.Robots
             _loggedOHLCBarsForTargetDate.Clear(); // Reset for this run
         }
 
-        
+        private double? FindNearestFractalLevel(TradeType tradeType, double currentPrice)
+        {
+            double? nearestLevel = null;
+            double minDistance = double.MaxValue;
 
-        
+            for (int i = 2; i < Bars.Count - 2; i++)
+            {
+                if (tradeType == TradeType.Buy)
+                {
+                    if (!double.IsNaN(_fractals.UpFractal[i]))
+                    {
+                        var distance = _fractals.UpFractal[i] - currentPrice;
+                        if (distance > 0 && distance < minDistance)
+                        {
+                            minDistance = distance;
+                            nearestLevel = _fractals.UpFractal[i];
+                        }
+                    }
+                }
+                else
+                {
+                    if (!double.IsNaN(_fractals.DownFractal[i]))
+                    {
+                        var distance = currentPrice - _fractals.DownFractal[i];
+                        if (distance > 0 && distance < minDistance)
+                        {
+                            minDistance = distance;
+                            nearestLevel = _fractals.DownFractal[i];
+                        }
+                    }
+                }
+            }
+
+            return nearestLevel;
+        }
+
+        private double? FindNextFractalLevel(TradeType tradeType, double currentPrice, double firstFractalLevel)
+        {
+            double? nextLevel = null;
+            double minDistance = double.MaxValue;
+
+            for (int i = 2; i < Bars.Count - 2; i++)
+            {
+                if (tradeType == TradeType.Buy)
+                {
+                    if (!double.IsNaN(_fractals.UpFractal[i]))
+                    {
+                        var distance = _fractals.UpFractal[i] - currentPrice;
+                        if (distance > 0 && _fractals.UpFractal[i] > firstFractalLevel && distance < minDistance)
+                        {
+                            minDistance = distance;
+                            nextLevel = _fractals.UpFractal[i];
+                        }
+                    }
+                }
+                else
+                {
+                    if (!double.IsNaN(_fractals.DownFractal[i]))
+                    {
+                        var distance = currentPrice - _fractals.DownFractal[i];
+                        if (distance > 0 && _fractals.DownFractal[i] < firstFractalLevel && distance < minDistance)
+                        {
+                            minDistance = distance;
+                            nextLevel = _fractals.DownFractal[i];
+                        }
+                    }
+                }
+            }
+
+            return nextLevel;
+        }
 
         private double CalculatePositionSize(double stopLossPips)
         {
@@ -236,9 +304,89 @@ namespace cAlgo.Robots
             }
         }
 
-     
+        private double CalculateStopLoss(TradeType tradeType, double asianFractalLevelToPlaceSLBehind)
+        {
+            if (tradeType == TradeType.Buy)
+            {
+                // For buy orders, place stop loss below the swept fractal with smaller buffer
+                return asianFractalLevelToPlaceSLBehind - (0.3 * Symbol.PipSize); // Уменьшаем буфер до 0.3 пипса
+            }
+            else
+            {
+                // For sell orders, place stop loss above the swept fractal
+                return asianFractalLevelToPlaceSLBehind + (0.3 * Symbol.PipSize); // Уменьшаем буфер до 0.3 пипса
+            }
+        }
 
-       
+        private void EnterPosition(TradeType tradeType, double entryPrice, AsianFractal fractal)
+        {
+            if (_lastTradeDate.Date == Server.Time.Date && Positions.Count > 0)
+            {
+                DebugLog("Trading limit: One trade per symbol per day. Position already exists or trade executed today.");
+                return;
+            }
+
+            if (fractal == null || fractal.SweepExtreme == null || fractal.BosLevel == null)
+            {
+                DebugLog("[ERROR_ENTRY] Fractal or its SweepExtreme/BosLevel is null. Cannot calculate SL.");
+                return;
+            }
+            
+            double slPrice;
+            string slCalculationBasis;
+
+            if (tradeType == TradeType.Buy)
+            {
+                // SL is below the low of the sweep bar
+                slPrice = Math.Round(fractal.SweepExtreme.Value - StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
+                slCalculationBasis = $"SweepExtreme.Low ({fractal.SweepExtreme.Value}) - Buffer ({StopLossBufferPips} pips)";
+            }
+            else // Sell
+            {
+                // SL is above the high of the sweep bar
+                slPrice = Math.Round(fractal.SweepExtreme.Value + StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
+                slCalculationBasis = $"SweepExtreme.High ({fractal.SweepExtreme.Value}) + Buffer ({StopLossBufferPips} pips)";
+            }
+            
+            var stopLossPips = Math.Abs(entryPrice - slPrice) / Symbol.PipSize;
+            if (stopLossPips < Symbol.PipSize * 1) // Minimum 1 pip SL
+            {
+                DebugLog($"[SL_ADJUST] Calculated SL ({stopLossPips} pips) is too small. Adjusting SL.");
+                if (tradeType == TradeType.Buy)
+                    slPrice = Math.Round(entryPrice - Symbol.PipSize * 5, Symbol.Digits); // Min 5 pips SL
+                else
+                    slPrice = Math.Round(entryPrice + Symbol.PipSize * 5, Symbol.Digits);
+                stopLossPips = Math.Abs(entryPrice - slPrice) / Symbol.PipSize;
+            }
+
+            var tpResult = CalculateTakeProfit(tradeType, entryPrice, slPrice);
+            if (tpResult.takeProfitPrice == null || tpResult.rr < MinRR)
+            {
+                DebugLog($"[TP_REJECT] TP calculation failed or RR too low ({tpResult.rr}). MinRR: {MinRR}. Entry: {entryPrice}, SL: {slPrice}");
+                return;
+            }
+
+            var positionSize = CalculatePositionSize(stopLossPips);
+            if (positionSize < Symbol.VolumeInUnitsMin)
+            {
+                DebugLog($"[VOL_REJECT] Calculated position size {positionSize} is less than min volume {Symbol.VolumeInUnitsMin}. SL pips: {stopLossPips}");
+                return;
+            }
+
+            var label = $"H3M_{tradeType}_{Server.Time.ToShortTimeString()}";
+            var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, label, slPrice, tpResult.takeProfitPrice);
+
+            if (result.IsSuccessful)
+            {
+                fractal.EntryDone = true; // Mark fractal as used for entry
+                _lastTradeDate = Server.Time.Date; // Update last trade date
+                DebugLog($"[TRADE_OPEN] {tradeType} order successful. Price: {result.Position.EntryPrice}, SL: {slPrice} (Basis: {slCalculationBasis}), TP: {tpResult.takeProfitPrice} (RR: {tpResult.rr}). Size: {positionSize}");
+            }
+            else
+            {
+                DebugLog($"[TRADE_FAIL] {tradeType} order failed: {result.Error}");
+            }
+        }
 
         private bool IsAsianSession()
         {
@@ -249,7 +397,13 @@ namespace cAlgo.Robots
             return hour >= 0 && hour < 9;
         }
 
-       
+        private bool IsLondonOrFrankfurtSession(DateTime time)
+        {
+            // Frankfurt: 09:00-10:00 UTC+3
+            // London:    10:00-15:00 UTC+3
+            // Assumes 'time' parameter is UTC+3
+            return IsInFrankfurtSession(time) || IsInLondonSession(time);
+        }
 
         private void CheckAsianSession()
         {
@@ -262,9 +416,56 @@ namespace cAlgo.Robots
             }
         }
 
-       
+        private void FindFractals()
+        {
+            if (!_isAsianSession) return;
 
-       
+            var trendContext = DetermineTrendContext();
+            
+            if (trendContext == TrendContext.Bearish)
+            {
+                for (int i = 2; i < Bars.Count - 2; i++)
+                {
+                    if (!double.IsNaN(_fractals.UpFractal[i]))
+                    {
+                        _currentFractalLevel = _fractals.UpFractal[i];
+                        break;
+                    }
+                }
+            }
+            else if (trendContext == TrendContext.Bullish)
+            {
+                for (int i = 2; i < Bars.Count - 2; i++)
+                {
+                    if (!double.IsNaN(_fractals.DownFractal[i]))
+                    {
+                        _currentFractalLevel = _fractals.DownFractal[i];
+                        break;
+                    }
+                }
+            }
+        }
+
+        private bool IsFractalSwept()
+        {
+            if (_currentFractalLevel == null) return false;
+
+            var trendContext = DetermineTrendContext();
+            var currentPrice = Bars.ClosePrices.Last(0);
+
+            if (trendContext == TrendContext.Bearish)
+            {
+                // For bearish trend, check if price went above the upper fractal
+                return currentPrice > _currentFractalLevel.Value;
+            }
+            else if (trendContext == TrendContext.Bullish)
+            {
+                // For bullish trend, check if price went below the lower fractal
+                return currentPrice < _currentFractalLevel.Value;
+            }
+
+            return false;
+        }
 
         private TrendContext SimpleTrendContext()
         {
@@ -737,11 +938,111 @@ namespace cAlgo.Robots
             }
         }
 
-      
+        private class StructureBreakResult
+        {
+            public bool IsBreak { get; set; }
+            public double EntryPrice { get; set; }
+            public DateTime BreakTime { get; set; } // Добавим время слома
+        }
 
-       
+        private StructureBreakResult Is3mStructureBreak(AsianFractal fractal, TrendContext trendContext)
+        {
+            var result = new StructureBreakResult { IsBreak = false };
+            if (fractal == null || !fractal.IsSwept || fractal.BosLevel == null || fractal.SweepBarIndex == null)
+            {
+                //DebugLog($"[BOS_CHECK_SKIP] Fractal not ready for BOS check. IsSwept: {fractal?.IsSwept}, BosLevel: {fractal?.BosLevel}, SweepBarIndex: {fractal?.SweepBarIndex}");
+                return result;
+            }
 
-        
+            var m3Bars = _m3Bars; //MarketData.GetBars(TimeFrame.Minute3);
+            if (m3Bars.Count < fractal.SweepBarIndex.Value + 2) // Need at least one bar after sweep bar
+            {
+                //DebugLog($"[BOS_CHECK_SKIP] Not enough M3 bars after sweep bar for BOS check. M3Bars: {m3Bars.Count}, SweepBarIndex: {fractal.SweepBarIndex.Value}");
+                return result;
+            }
+            
+            // Start checking from the bar AFTER the sweep bar up to the latest completed bar
+            // The sweep bar itself cannot be the BOS bar with this logic (Close > its own High/Low)
+            // SweepBarIndex is 0-based index of the bar that performed the sweep.
+            // So, the first potential BOS bar is at index SweepBarIndex + 1.
+            // m3Bars.Count - 1 is the index of the latest completed bar.
+            int firstPotentialBosBarIndex = fractal.SweepBarIndex.Value + 1;
+
+            // We should only check new bars for BOS
+            int startIndexToCheck = Math.Max(firstPotentialBosBarIndex, fractal.LastBosCheckBarIndex + 1);
+
+            for (int i = startIndexToCheck; i < m3Bars.Count; i++)
+            {
+                var candidateBar = m3Bars[i];
+                fractal.LastBosCheckBarIndex = i; // Update last checked bar index
+
+                // Debug specific bar if it matches
+                if (candidateBar.OpenTime == _debugSpecificTimestamp && !_loggedSpecificBarDataThisInstance)
+                {
+                     DebugLog($"[DEBUG_OHLC_BAR_SPECIFIC_FOR_BOS_CHECK] Target Time: {_debugSpecificTimestamp}. Bar {candidateBar.OpenTime} (Index {i}) O:{candidateBar.Open} H:{candidateBar.High} L:{candidateBar.Low} C:{candidateBar.Close} Vol:{candidateBar.TickVolume}. Checking against BOS level: {fractal.BosLevel}");
+                    _loggedSpecificBarDataThisInstance = true; // Log only once per OnTick instance for this specific bar
+                }
+
+                if (trendContext == TrendContext.Bullish || TrendMode == ManualTrendMode.Bullish)
+                {
+                    // BOS Level for Bullish is High of the sweep bar
+                    if (candidateBar.Low > fractal.BosLevel.Value)
+                    {
+                        double distanceToBosLevelPips = (candidateBar.Close - fractal.BosLevel.Value) / Symbol.PipSize;
+                        DebugLog($"[BOS_DEBUG_BULL] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close} vs BOS Level (SweepBarHigh): {fractal.BosLevel.Value}. Dist: {distanceToBosLevelPips:F1} pips.");
+
+                        if (distanceToBosLevelPips <= MaxBOSDistancePips)
+                        {
+                            result.IsBreak = true;
+                            result.EntryPrice = candidateBar.Close; // Or Open of next bar, for now, Close of confirming bar
+                            result.BreakTime = candidateBar.OpenTime;
+                            DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} > BOS Level: {fractal.BosLevel.Value}. Entry at market.");
+                            return result; // BOS found
+                        }
+                        else
+                        {
+                            DebugLog($"[BOS_REJECT_BULL] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
+                            fractal.EntryDone = true; // Invalidate fractal if BOS is too far
+                            return result; // Stop checking for this fractal
+                        }
+                    }
+                }
+                else if (trendContext == TrendContext.Bearish || TrendMode == ManualTrendMode.Bearish)
+                {
+                    // BOS Level for Bearish is Low of the sweep bar
+                    if (candidateBar.Close < fractal.BosLevel.Value)
+                    {
+                        double distanceToBosLevelPips = (fractal.BosLevel.Value - candidateBar.Close) / Symbol.PipSize;
+                        DebugLog($"[BOS_DEBUG_BEAR] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close} vs BOS Level (SweepBarLow): {fractal.BosLevel.Value}. Dist: {distanceToBosLevelPips:F1} pips.");
+                        
+                        if (distanceToBosLevelPips <= MaxBOSDistancePips)
+                        {
+                            result.IsBreak = true;
+                            result.EntryPrice = candidateBar.Close;
+                            result.BreakTime = candidateBar.OpenTime;
+                            DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} < BOS Level: {fractal.BosLevel.Value}. Entry at market.");
+                            return result; // BOS found
+                        }
+                        else
+                        {
+                             DebugLog($"[BOS_REJECT_BEAR] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
+                            fractal.EntryDone = true; // Invalidate fractal if BOS is too far
+                            return result; // Stop checking for this fractal
+                        }
+                    }
+                }
+            }
+            return result; // No BOS found on checked bars
+        }
+
+        private bool IsInAsiaSession(DateTime time)
+        {
+            int hour = time.Hour; // time is expected to be UTC
+            // Asia session 00:00-09:00 local time (e.g. UTC+3) corresponds to 21:00 (previous day) - 06:00 UTC.
+            // The current implementation hour >= 0 && hour < 6 covers 00:00-05:59 UTC.
+            // This definition means Asian session ends just as Frankfurt UTC starts.
+            return hour >= 0 && hour < 6; 
+        }
         private bool IsInFrankfurtSession(DateTime time)
         {
             // Frankfurt: 09:00 - 10:00 local time (e.g. UTC+3)
@@ -758,7 +1059,51 @@ namespace cAlgo.Robots
         }
 
         // Добавим новый метод для поиска ключевых уровней
-        
+        private double? FindKeyLevelForTP(TradeType tradeType, double entryPrice)
+        {
+            var h1Bars = _h1Bars;
+            if (h1Bars.Count < 10) return null;
+            
+            // Находим максимумы и минимумы за последние 24 часа
+            double highest = double.MinValue;
+            double lowest = double.MaxValue;
+            int lookback = Math.Min(24, h1Bars.Count);
+            
+            for (int i = 0; i < lookback; i++)
+            {
+                highest = Math.Max(highest, h1Bars.HighPrices[h1Bars.Count - 1 - i]);
+                lowest = Math.Min(lowest, h1Bars.LowPrices[h1Bars.Count - 1 - i]);
+            }
+            
+            if (tradeType == TradeType.Buy)
+            {
+                // Для лонга ищем уровень выше текущей цены
+                if (highest > entryPrice)
+                {
+                    DebugLog($"[DEBUG] Найден ключевой уровень для лонга (максимум 24ч): {highest:F5}");
+                    return highest;
+                }
+                
+                // Если максимум не подходит, используем уровень на основе текущей цены
+                double targetLevel = entryPrice + (entryPrice - lowest) * 0.618; // 61.8% фибо
+                DebugLog($"[DEBUG] Расчетный ключевой уровень для лонга: {targetLevel:F5}");
+                return targetLevel;
+            }
+            else
+            {
+                // Для шорта ищем уровень ниже текущей цены
+                if (lowest < entryPrice)
+                {
+                    DebugLog($"[DEBUG] Найден ключевой уровень для шорта (минимум 24ч): {lowest:F5}");
+                    return lowest;
+                }
+                
+                // Если минимум не подходит, используем уровень на основе текущей цены
+                double targetLevel = entryPrice - (highest - entryPrice) * 0.618; // 61.8% фибо
+                DebugLog($"[DEBUG] Расчетный ключевой уровень для шорта: {targetLevel:F5}");
+                return targetLevel;
+            }
+        }
 
         private bool IsStrongTrend(out TrendContext context)
         {

@@ -18,6 +18,7 @@ namespace cAlgo.Robots
         public bool EntryDone { get; set; } // Был ли вход по этому фракталу
         public int? SweepBarIndex { get; set; } // Индекс бара, который сделал свип
         public int LastBosCheckBarIndex { get; set; } // Индекс последнего M3 бара, проверенного на BOS для этого фрактала
+        public double? BosLevel { get; set; } // New property for BOS level
     }
 
     [Robot(AccessRights = AccessRights.None, AddIndicators = true)]
@@ -56,12 +57,20 @@ namespace cAlgo.Robots
         private static readonly int AsiaStartHour = 0; // 00:00 UTC+3
         private static readonly int AsiaEndHour = 9;   // 09:00 UTC+3
         private DateTime _lastTradeDate = DateTime.MinValue;
+        private bool _loggedSpecificBarData = false; // Флаг, чтобы залогировать данные только один раз
+        private bool _loggedSpecificBarDataThisInstance = false; // Added for specific bar logging
+        private DateTime _debugSpecificTimestamp = DateTime.MinValue; // Declare _debugSpecificTimestamp
+        private HashSet<DateTime> _loggedOHLCBarsForTargetDate = new HashSet<DateTime>(); // For M3 OHLC logging
 
         protected override void OnStart()
         {
             _fractals = Indicators.Fractals(Bars, FractalPeriod);
             _m3Bars = MarketData.GetBars(TimeFrame.Minute3);
             _h1Bars = MarketData.GetBars(TimeFrame.Hour);
+
+            // For 14.05.2025 debugging:
+            _debugSpecificTimestamp = new DateTime(2025, 5, 14, 6, 15, 0, DateTimeKind.Utc); // For Is3mStructureBreak logging of 06:15 bar
+            _loggedOHLCBarsForTargetDate.Clear(); // Reset for this run
         }
 
         private double? FindNearestFractalLevel(TradeType tradeType, double currentPrice)
@@ -232,93 +241,66 @@ namespace cAlgo.Robots
 
         private (double? takeProfitPrice, double rr) CalculateTakeProfit(TradeType tradeType, double entryPrice, double stopLossPrice)
         {
+            DebugLog($"[TP_DEBUG] CalculateTakeProfit called. TradeType: {tradeType}, Entry: {entryPrice:F5}, SL: {stopLossPrice:F5}");
             var stopLossDistance = Math.Abs(entryPrice - stopLossPrice);
             if (stopLossDistance == 0) 
             {
-                DebugLog("[DEBUG] CalculateTakeProfit: Расстояние до стоп-лосса равно 0. Невозможно рассчитать RR.");
+                DebugLog("[TP_DEBUG] CalculateTakeProfit: Stop Loss distance is 0. Cannot calculate RR.");
                 return (null, 0);
             }
+            DebugLog($"[TP_DEBUG] Stop Loss Distance (Pips): {stopLossDistance/Symbol.PipSize:F1}");
 
             // 1. Ищем ближайший H1 фрактал для TP
             double? firstTpCandidate = FindNearestH1FractalForTP(tradeType, entryPrice);
-            DebugLog($"[DEBUG] CalculateTakeProfit: Вход={entryPrice:F5}, SL={stopLossPrice:F5}, SL_dist={stopLossDistance:F5}");
+            DebugLog($"[TP_DEBUG] Nearest H1 Fractal for TP: {firstTpCandidate?.ToString("F5") ?? "N/A"}");
 
             if (firstTpCandidate.HasValue)
             {
-                DebugLog($"[DEBUG] CalculateTakeProfit: Первый кандидат на TP (ближайший H1 фрактал): {firstTpCandidate.Value:F5}");
                 double rr1 = Math.Abs(firstTpCandidate.Value - entryPrice) / stopLossDistance;
-                DebugLog($"[DEBUG] CalculateTakeProfit: RR для первого TP ({firstTpCandidate.Value:F5}) = {rr1:F2}");
+                DebugLog($"[TP_DEBUG] RR for First TP Candidate ({firstTpCandidate.Value:F5}): {rr1:F2}");
 
                 if (rr1 >= MinRR && rr1 <= MaxRR)
                 {
-                    DebugLog($"[DEBUG] CalculateTakeProfit: Первый TP ({firstTpCandidate.Value:F5}) подходит по RR ({rr1:F2}). Используем его.");
+                    DebugLog($"[TP_DEBUG] First TP ({firstTpCandidate.Value:F5}) is SUITABLE. Using it.");
                     return (firstTpCandidate.Value, rr1);
                 }
                 else if (rr1 < MinRR)
                 {
-                    DebugLog($"[DEBUG] CalculateTakeProfit: RR для первого TP ({firstTpCandidate.Value:F5}) слишком низкий ({rr1:F2} < {MinRR:F2}). Ищем следующий H1 фрактал.");
+                    DebugLog($"[TP_DEBUG] RR for First TP ({firstTpCandidate.Value:F5}) is TOO LOW ({rr1:F2} < {MinRR:F2}). Searching for next H1 fractal.");
                     double? secondTpCandidate = TryFindNextH1Fractal(tradeType, entryPrice, firstTpCandidate.Value);
+                    DebugLog($"[TP_DEBUG] Next H1 Fractal for TP: {secondTpCandidate?.ToString("F5") ?? "N/A"}");
                     if (secondTpCandidate.HasValue)
                     {
-                        DebugLog($"[DEBUG] CalculateTakeProfit: Второй кандидат на TP (следующий H1 фрактал): {secondTpCandidate.Value:F5}");
                         double rr2 = Math.Abs(secondTpCandidate.Value - entryPrice) / stopLossDistance;
-                        DebugLog($"[DEBUG] CalculateTakeProfit: RR для второго TP ({secondTpCandidate.Value:F5}) = {rr2:F2}");
+                        DebugLog($"[TP_DEBUG] RR for Second TP Candidate ({secondTpCandidate.Value:F5}): {rr2:F2}");
 
                         if (rr2 >= MinRR && rr2 <= MaxRR)
                         {
-                            DebugLog($"[DEBUG] CalculateTakeProfit: Второй TP ({secondTpCandidate.Value:F5}) подходит по RR ({rr2:F2}). Используем его.");
+                            DebugLog($"[TP_DEBUG] Second TP ({secondTpCandidate.Value:F5}) is SUITABLE. Using it.");
                             return (secondTpCandidate.Value, rr2);
                         }
                         else
                         {
-                            DebugLog($"[DEBUG] CalculateTakeProfit: RR для второго TP ({secondTpCandidate.Value:F5}) не подходит ({rr2:F2}). Диапазон RR: {MinRR:F2}-{MaxRR:F2}. Вход отменен.");
-                            return (null, rr2); // Возвращаем RR, даже если TP не подходит, для логов
+                            DebugLog($"[TP_DEBUG] RR for Second TP ({secondTpCandidate.Value:F5}) is NOT SUITABLE ({rr2:F2}). Valid RR Range: {MinRR:F2}-{MaxRR:F2}. Entry might be cancelled.");
+                            return (null, rr2); 
                         }
                     }
                     else
                     {
-                        DebugLog($"[DEBUG] Следующий H1 фрактал не найден. Первый TP ({firstTpCandidate.Value:F5}) имел RR={rr1:F2}. Вход отменен.");
-                        return (null, rr1); // Возвращаем RR от первого TP
+                        DebugLog($"[TP_DEBUG] No next H1 fractal found. First TP ({firstTpCandidate.Value:F5}) had RR={rr1:F2}. Entry might be cancelled.");
+                        return (null, rr1); 
                     }
                 }
                 else // rr1 > MaxRR
                 {
-                    DebugLog($"[DEBUG] RR для первого TP ({firstTpCandidate.Value:F5}) слишком высокий ({rr1:F2} > {MaxRR:F2}). Вход отменен.");
+                    DebugLog($"[TP_DEBUG] RR for First TP ({firstTpCandidate.Value:F5}) is TOO HIGH ({rr1:F2} > {MaxRR:F2}). Entry might be cancelled.");
                     return (null, rr1);
                 }
             }
             else
             {
-                DebugLog($"[DEBUG] Ближайший H1 фрактал для TP не найден. Используем альтернативный ключевой уровень.");
-                // Если фракталы не найдены, пробуем использовать FindKeyLevelForTP
-                // ВАЖНО: Логика FindKeyLevelForTP может не соответствовать стратегии, основанной строго на фракталах.
-                // Раскомментируйте и протестируйте, если это приемлемо.
-                /*
-                double? keyLevelTp = FindKeyLevelForTP(tradeType, entryPrice);
-                if (keyLevelTp.HasValue)
-                {
-                    DebugLog($"[DEBUG] CalculateTakeProfit: Альтернативный TP (ключевой уровень): {keyLevelTp.Value:F5}");
-                    double rrKey = Math.Abs(keyLevelTp.Value - entryPrice) / stopLossDistance;
-                    DebugLog($"[DEBUG] CalculateTakeProfit: RR для ключевого уровня ({keyLevelTp.Value:F5}) = {rrKey:F2}");
-                    if (rrKey >= MinRR && rrKey <= MaxRR)
-                    {
-                        DebugLog($"[DEBUG] CalculateTakeProfit: Ключевой уровень TP ({keyLevelTp.Value:F5}) подходит по RR ({rrKey:F2}). Используем его.");
-                        return (keyLevelTp.Value, rrKey);
-                    }
-                    else
-                    {
-                        DebugLog($"[DEBUG] RR для ключевого уровня ({keyLevelTp.Value:F5}) не подходит ({rrKey:F2}). Вход отменен.");
-                        return (null, rrKey);
-                    }
-                }
-                else
-                {
-                    DebugLog("[DEBUG] Ключевой уровень для TP также не найден. Вход отменен.");
-                    return (null, 0);
-                }
-                */
-                DebugLog("[DEBUG] H1 фракталы и ключевые уровни не найдены. Вход отменен.");
-                return (null, 0); // Если фракталы не найдены, нет TP
+                DebugLog($"[TP_DEBUG] No H1 fractals found for TP. Entry might be cancelled based on other TP logic (if any) or lack of TP.");
+                return (null, 0);
             }
         }
 
@@ -338,74 +320,71 @@ namespace cAlgo.Robots
 
         private void EnterPosition(TradeType tradeType, double entryPrice, AsianFractal fractal)
         {
-            if (fractal.EntryDone) { DebugLog("[DEBUG] Уже был вход по этому фракталу"); return; }
-            if (Positions.Find("H3M") != null) { DebugLog("[DEBUG] Уже есть открытая позиция H3M"); return; }
-            
-            var lastSweptFractal = fractal;
-            if (lastSweptFractal == null) { DebugLog("[DEBUG] Нет свипнутого фрактала для входа"); return; }
-            
-            DebugLog($"[DEBUG] =====ВХОД В ПОЗИЦИЮ===== Попытка входа в {tradeType} позицию после свипа фрактала {lastSweptFractal.Level:F5} ({lastSweptFractal.Time})");
-            DebugLog($"[DEBUG] Азиатский фрактал: {lastSweptFractal.Level:F5}, Экстремум M3 бара свипа: {lastSweptFractal.SweepExtreme.Value:F5}, Цена входа (BOS): {entryPrice:F5}");
-            
-            // Стоп-лосс размещается за экстремумом M3 бара, который совершил свип азиатского фрактала
-            var stopLossPrice = CalculateStopLoss(tradeType, lastSweptFractal.SweepExtreme.Value); 
-            
-            var (takeProfitPrice, rr) = CalculateTakeProfit(tradeType, entryPrice, stopLossPrice);
-            
-            // --- Логирование для 14.05.2025 ---
-            if (Server.Time.Date == new DateTime(2025, 5, 14))
+            if (_lastTradeDate.Date == Server.Time.Date && Positions.Count > 0)
             {
-                DebugLog($"[USER_TARGET_LOG 14.05.2025] EnterPosition для азиатского фрактала ~1.11832, вход ~1.11913:");
-                DebugLog($"    > Бот: SL={stopLossPrice:F5}, TP={takeProfitPrice?.ToString("F5") ?? "N/A"}, RR={rr:F2}");
-                DebugLog($"    > Ожидание: SL ~1.11891, TP ~1.12360 (предполагая положительное значение).");
-                if (takeProfitPrice.HasValue) {
-                    if (rr < MinRR) DebugLog($"    > Бот (RR Check): RR ({rr:F2}) < MinRR ({MinRR:F2}). Вход НЕВОЗМОЖЕН.");
-                    else if (rr > MaxRR) DebugLog($"    > Бот (RR Check): RR ({rr:F2}) > MaxRR ({MaxRR:F2}). Вход НЕВОЗМОЖЕН.");
-                    else DebugLog($"    > Бот (RR Check): RR ({rr:F2}) в диапазоне [{MinRR:F2} - {MaxRR:F2}]. Вход ВОЗМОЖЕН.");
-                } else {
-                    DebugLog($"    > Бот (RR Check): Тейк-профит не рассчитан. Вход НЕВОЗМОЖЕН.");
-                }
+                DebugLog("Trading limit: One trade per symbol per day. Position already exists or trade executed today.");
+                return;
             }
-            // --- Конец логирования для 14.05.2025 ---
 
-            if (rr < MinRR)
+            if (fractal == null || fractal.SweepExtreme == null || fractal.BosLevel == null)
             {
-                DebugLog($"[DEBUG] RR слишком низкий: {rr:F2} < {MinRR:F2}, вход отменен");
+                DebugLog("[ERROR_ENTRY] Fractal or its SweepExtreme/BosLevel is null. Cannot calculate SL.");
                 return;
             }
             
-            if (rr > MaxRR)
+            double slPrice;
+            string slCalculationBasis;
+
+            if (tradeType == TradeType.Buy)
             {
-                DebugLog($"[DEBUG] RR слишком высокий: {rr:F2} > {MaxRR:F2}, вход отменен");
-                return;
+                // SL is below the low of the sweep bar
+                slPrice = Math.Round(fractal.SweepExtreme.Value - StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
+                slCalculationBasis = $"SweepExtreme.Low ({fractal.SweepExtreme.Value}) - Buffer ({StopLossBufferPips} pips)";
+            }
+            else // Sell
+            {
+                // SL is above the high of the sweep bar
+                slPrice = Math.Round(fractal.SweepExtreme.Value + StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
+                slCalculationBasis = $"SweepExtreme.High ({fractal.SweepExtreme.Value}) + Buffer ({StopLossBufferPips} pips)";
             }
             
-            if (takeProfitPrice == null)
+            var stopLossPips = Math.Abs(entryPrice - slPrice) / Symbol.PipSize;
+            if (stopLossPips < Symbol.PipSize * 1) // Minimum 1 pip SL
             {
-                DebugLog($"[DEBUG] Не удалось определить уровень тейк-профита, вход отменен");
+                DebugLog($"[SL_ADJUST] Calculated SL ({stopLossPips} pips) is too small. Adjusting SL.");
+                if (tradeType == TradeType.Buy)
+                    slPrice = Math.Round(entryPrice - Symbol.PipSize * 5, Symbol.Digits); // Min 5 pips SL
+                else
+                    slPrice = Math.Round(entryPrice + Symbol.PipSize * 5, Symbol.Digits);
+                stopLossPips = Math.Abs(entryPrice - slPrice) / Symbol.PipSize;
+            }
+
+            var tpResult = CalculateTakeProfit(tradeType, entryPrice, slPrice);
+            if (tpResult.takeProfitPrice == null || tpResult.rr < MinRR)
+            {
+                DebugLog($"[TP_REJECT] TP calculation failed or RR too low ({tpResult.rr}). MinRR: {MinRR}. Entry: {entryPrice}, SL: {slPrice}");
                 return;
             }
-            
-            DebugLog($"[DEBUG] Расчет RR: Цена входа={entryPrice:F5}, SL={stopLossPrice:F5}, TP={takeProfitPrice:F5}, RR={rr:F2}");
-            double positionSize = CalculatePositionSize(Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize);
-            
-            if (positionSize == 0) { DebugLog("[DEBUG] Размер позиции 0, вход невозможен"); return; }
-            
-            DebugLog($"[DEBUG] Вход по рынку: {tradeType}, SL={stopLossPrice:F5}, TP={takeProfitPrice:F5}, RR={rr:F2}, size={positionSize}");
-            var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, "H3M", stopLossPrice, takeProfitPrice);
-            
+
+            var positionSize = CalculatePositionSize(stopLossPips);
+            if (positionSize < Symbol.VolumeInUnitsMin)
+            {
+                DebugLog($"[VOL_REJECT] Calculated position size {positionSize} is less than min volume {Symbol.VolumeInUnitsMin}. SL pips: {stopLossPips}");
+                return;
+            }
+
+            var label = $"H3M_{tradeType}_{Server.Time.ToShortTimeString()}";
+            var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, label, slPrice, tpResult.takeProfitPrice);
+
             if (result.IsSuccessful)
             {
-                DebugLog($"[DEBUG] =====ВХОД УСПЕШЕН===== {tradeType} по {result.Position.EntryPrice:F5}");
-                DebugLog($"[DEBUG] Stop Loss: {stopLossPrice:F5} (за фракталом {lastSweptFractal.Level:F5})");
-                DebugLog($"[DEBUG] Take Profit: {takeProfitPrice:F5}");
-                DebugLog($"[DEBUG] Risk/Reward: {rr:F2}");
-                fractal.EntryDone = true;
-                _lastTradeDate = Server.Time;
+                fractal.EntryDone = true; // Mark fractal as used for entry
+                _lastTradeDate = Server.Time.Date; // Update last trade date
+                DebugLog($"[TRADE_OPEN] {tradeType} order successful. Price: {result.Position.EntryPrice}, SL: {slPrice} (Basis: {slCalculationBasis}), TP: {tpResult.takeProfitPrice} (RR: {tpResult.rr}). Size: {positionSize}");
             }
             else
             {
-                DebugLog($"[DEBUG] Ошибка входа по рынку: {result.Error}");
+                DebugLog($"[TRADE_FAIL] {tradeType} order failed: {result.Error}");
             }
         }
 
@@ -700,23 +679,79 @@ namespace cAlgo.Robots
 
         private void DebugLog(string message)
         {
-            var time = Server.Time;
+            var time = Server.Time; // Current server time for context
 
+            // Special handling for the target debugging date
             if (time.Date == new DateTime(2025, 5, 14))
             {
-                // Always log messages containing specific markers for 14.05.2025 debugging
-                if (message.Contains("[DEBUG 14.05.2025]") || message.Contains("[USER_TARGET_LOG 14.05.2025]"))
+                // For the target date, print messages that have any of our key debug tags
+                // or are specifically marked for this date.
+                bool shouldPrintOnTargetDate =
+                    message.Contains("[DEBUG]") || // General debug prefix
+                    message.Contains("[SWEEP_") || // Covers [SWEEP_BULL], [SWEEP_BEAR]
+                    message.Contains("[BOS_") ||   // Covers [BOS_DEBUG_...], [BOS_SUCCESS_...], [BOS_REJECT_...]
+                    message.Contains("[TP_DEBUG]") ||
+                    message.Contains("[TP_REJECT]") ||
+                    message.Contains("[TRADE_") || // Covers [TRADE_OPEN], [TRADE_FAIL]
+                    message.Contains("[ERROR_") || // Covers [ERROR_ENTRY]
+                    message.Contains("[VOL_REJECT]") ||
+                    message.Contains("[SL_ADJUST]") ||
+                    message.Contains("[DEBUG_OHLC_M3]") || // Specific M3 OHLC logging for 06:03, 06:15
+                    message.Contains("[DEBUG_OHLC_BAR_SPECIFIC_FOR_BOS_CHECK]") || // Specific OHLC from Is3mStructureBreak
+                    message.Contains("[USER_TARGET_LOG 14.05.2025]") || // User's explicit tag
+                    message.Contains("Азиатский фрактал") || // Fractal finding logs
+                    message.Contains("Найден") || // Fractal finding logs
+                    message.Contains("Нет очевидного тренда") ||
+                    message.Contains("НОВЫЙ ТИК") ||
+                    message.Contains("КОНЕЦ ТИКА") ||
+                    message.Contains("Текущий тренд") ||
+                    message.Contains("Уже была сделка сегодня") ||
+                    message.Contains("Поиск фракталов") ||
+                    message.Contains("Проверка свипа фракталов");
+
+                if (shouldPrintOnTargetDate)
                 {
                     Print(message);
                 }
-                // All other (non-marked) DebugLog calls on 14.05.2025 will be suppressed.
-                return; 
+                return; // Explicitly return to process logs only based on above for this date
             }
-            // On other dates, DebugLog will do nothing by default.
+
+            // Default behavior for other dates: suppress logs unless a global debug flag is enabled (not implemented here)
+            // For now, this means logs will only appear for 2025-05-14 based on the logic above.
         }
 
         protected override void OnTick()
         {
+            _loggedSpecificBarDataThisInstance = false; // Reset this flag at the start of each OnTick
+
+            // --- Logging specific M3 bars for 14.05.2025 ---
+            if (Server.Time.Date == new DateTime(2025, 5, 14) && _m3Bars.Count > 0)
+            {
+                var targetTimesToLog = new List<DateTime>
+                {
+                    new DateTime(2025, 5, 14, 6, 3, 0, DateTimeKind.Utc),
+                    new DateTime(2025, 5, 14, 6, 15, 0, DateTimeKind.Utc)
+                };
+
+                // Check the last few M3 bars to see if they match our target times
+                for (int i = 0; i < Math.Min(5, _m3Bars.Count); i++) 
+                {
+                    var bar = _m3Bars.Last(i);
+                    if (targetTimesToLog.Contains(bar.OpenTime) && !_loggedOHLCBarsForTargetDate.Contains(bar.OpenTime))
+                    {
+                        DebugLog($"[DEBUG_OHLC_M3] Time: {bar.OpenTime:HH:mm:ss}, O={bar.Open:F5}, H={bar.High:F5}, L={bar.Low:F5}, C={bar.Close:F5}");
+                        _loggedOHLCBarsForTargetDate.Add(bar.OpenTime);
+                    }
+                }
+            }
+            // --- End of specific M3 bar logging ---
+
+            if (Bars.TimeFrame != TimeFrame.Hour) // Убедимся, что OnTick работает на основном таймфрейме робота (H1)
+            {
+                DebugLog($"[DEBUG] Неверный таймфрейм для OnTick: {Bars.TimeFrame}");
+                return;
+            }
+
             TrendContext trendContext; // Объявляем переменную для тренда
             var currentPrice = Symbol.Bid; // Для лонгов используем Bid, для шортов Ask
 
@@ -838,7 +873,6 @@ namespace cAlgo.Robots
 
             if (today == new DateTime(2025, 5, 14)) // Логируем только для целевой даты
             {
-                DebugLog($"[DEBUG 14.05.2025] FindAsianSessionFractals: After sorting for {trendContext}. Found {_asianFractals.Count} fractals. CurrentPrice for diff: {currentPrice:F5}");
                 foreach (var f in _asianFractals)
                 {
                     DebugLog($"    - Level: {f.Level:F5}, Time: {f.Time}, Diff Pips: {Math.Abs(f.Level - currentPrice) / Symbol.PipSize:F1}");
@@ -848,192 +882,60 @@ namespace cAlgo.Robots
 
         private void CheckFractalsSweep(TrendContext trendContext)
         {
-            if (_asianFractals.Count == 0)
-            {
-                //DebugLog("[DEBUG] Нет азиатских фракталов для проверки свипа.");
-                return;
-            }
+            var m3Bars = _m3Bars; // MarketData.GetBars(TimeFrame.Minute3);
+            if (m3Bars.Count < FractalPeriod * 2 + 1) return;
 
-            bool anyFractalSweptThisTick = false;
+            var currentM3Bar = m3Bars.Last(1); // Last completed M3 bar
 
-            // --- НАЧАЛО: Сброс состояния свипа до начала европейских сессий ---
-            if (Server.Time.Hour < 9) // Если еще не 09:00 (начало Франкфурта)
+            foreach (var fractal in _asianFractals.Where(f => !f.IsSwept && !f.EntryDone).ToList())
             {
-                foreach (var fractalToReset in _asianFractals.Where(f => f.IsSwept && f.Time.Date == Server.Time.Date))
+                // Ensure we only check sweeps during or after the fractal formation time
+                if (currentM3Bar.OpenTime < fractal.Time) continue;
+
+                bool sweptThisTick = false;
+
+                if (trendContext == TrendContext.Bullish || TrendMode == ManualTrendMode.Bullish) // Looking for bullish entries
                 {
-                    DebugLog($"[DEBUG 14.05.2025] RESETTING Early Sweep State for Fractal {fractalToReset.Level:F5} @ {fractalToReset.Time}. Server.Time: {Server.Time:HH:mm:ss}");
-                    fractalToReset.IsSwept = false;
-                    fractalToReset.SweepLevel = null;
-                    fractalToReset.SweepExtreme = null;
-                    fractalToReset.SweepBarIndex = null;
-                    // LastBosCheckBarIndex не сбрасываем здесь, т.к. он связан с уже проверенными барами для BOS
-                }
-            }
-            // --- КОНЕЦ: Сброс состояния свипа ---
-
-            foreach (var fractal in _asianFractals.Where(f => !f.EntryDone)) // Проверяем только те, по которым не было входа
-            {
-                // Убедимся, что свип и последующий BOS рассматриваются только в разрешенные сессии и в день фрактала
-                bool canProcessSweep = IsLondonOrFrankfurtSession(Server.Time) && Server.Time.Date == fractal.Time.Date;
-
-                // Проверка мгновенного свипа текущей ценой
-                if (canProcessSweep && !fractal.IsSwept) // Только если еще не свипнут И текущее время в сессии
-                {
-                    if (trendContext == TrendContext.Bullish && Symbol.Bid < fractal.Level)
+                    // Check for sweep of LOW fractal
+                    if (currentM3Bar.Low < fractal.Level)
                     {
                         fractal.IsSwept = true;
-                        fractal.SweepLevel = Symbol.Bid;
-                        fractal.SweepExtreme = Symbol.Bid; 
-                        fractal.SweepBarIndex = _m3Bars.Count -1; 
-                        DebugLog($"[DEBUG 14.05.2025] INSTANT Bullish Sweep SET: Fractal {fractal.Level:F5} @ {fractal.Time}, SweepBarIndex: {fractal.SweepBarIndex.Value}, SweepExtreme: {fractal.SweepExtreme.Value:F5}, Server.Time: {Server.Time:HH:mm:ss}");
-                        fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; 
-                        anyFractalSweptThisTick = true;
-                        DebugLog($"[DEBUG] Мгновенный СВИП (в сессии) фрактала {fractal.Level:F5} в {fractal.Time} текущей ценой {Symbol.Bid:F5}. SweepExtreme установлен {fractal.SweepExtreme:F5}");
+                        sweptThisTick = true;
+                        fractal.SweepLevel = fractal.Level;
+                        fractal.SweepExtreme = currentM3Bar.Low; // Low of the bar that swept
+                        fractal.SweepBarIndex = m3Bars.Count - 2; // Index of the bar that swept (currentM3Bar is Last(1), so its index is Count-2 in 0-based)
+
+                        // BOS level is the HIGH of the sweep bar
+                        fractal.BosLevel = currentM3Bar.High; 
+                        fractal.LastBosCheckBarIndex = m3Bars.Count -2; // Reset BOS check index for this fractal
+
+                        DebugLog($"[SWEEP_BULL] Low fractal {fractal.Level} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar L: {currentM3Bar.Low}, H: {currentM3Bar.High}. New BOS Level: {fractal.BosLevel}");
                     }
-                    else if (trendContext == TrendContext.Bearish && Symbol.Ask > fractal.Level)
+                }
+                else if (trendContext == TrendContext.Bearish || TrendMode == ManualTrendMode.Bearish) // Looking for bearish entries
+                {
+                    // Check for sweep of HIGH fractal
+                    if (currentM3Bar.High > fractal.Level)
                     {
                         fractal.IsSwept = true;
-                        fractal.SweepLevel = Symbol.Ask;
-                        fractal.SweepExtreme = Symbol.Ask; 
-                        fractal.SweepBarIndex = _m3Bars.Count -1; 
-                        DebugLog($"[DEBUG 14.05.2025] INSTANT Bearish Sweep SET: Fractal {fractal.Level:F5} @ {fractal.Time}, SweepBarIndex: {fractal.SweepBarIndex.Value}, SweepExtreme: {fractal.SweepExtreme.Value:F5}, Server.Time: {Server.Time:HH:mm:ss}");
-                        fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value;
-                        anyFractalSweptThisTick = true;
-                        DebugLog($"[DEBUG] Мгновенный СВИП (в сессии) фрактала {fractal.Level:F5} в {fractal.Time} текущей ценой {Symbol.Ask:F5}. SweepExtreme установлен {fractal.SweepExtreme:F5}");
+                        sweptThisTick = true;
+                        fractal.SweepLevel = fractal.Level;
+                        fractal.SweepExtreme = currentM3Bar.High; // High of the bar that swept
+                        fractal.SweepBarIndex = m3Bars.Count - 2;
+
+                        // BOS level is the LOW of the sweep bar
+                        fractal.BosLevel = currentM3Bar.Low;
+                        fractal.LastBosCheckBarIndex = m3Bars.Count - 2;
+
+                        DebugLog($"[SWEEP_BEAR] High fractal {fractal.Level} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar H: {currentM3Bar.High}, L: {currentM3Bar.Low}. New BOS Level: {fractal.BosLevel}");
                     }
                 }
 
-                // Если уже свипнут (в правильной сессии) и не было входа
-                if (fractal.IsSwept && Server.Time.Date == fractal.Time.Date && !fractal.EntryDone) // Добавил Server.Time.Date == fractal.Time.Date для явности
+                if (sweptThisTick)
                 {
-                    // Проверяем BOS - Is3mStructureBreak уже содержит проверку сессии для бара BOS
-                    var bosResult = Is3mStructureBreak(fractal, trendContext);
-                    if (bosResult.IsBreak)
-                    {
-                        DebugLog($"[DEBUG] СЛОМ СТРУКТУРЫ подтвержден для фрактала {fractal.Level:F5} (свипнут на {fractal.SweepExtreme:F5}). Время слома: {bosResult.BreakTime}, Цена входа: {bosResult.EntryPrice:F5}");
-                        EnterPosition(trendContext == TrendContext.Bullish ? TradeType.Buy : TradeType.Sell, bosResult.EntryPrice, fractal);
-                        // fractal.EntryDone = true; // Помечается внутри EnterPosition
-                        if (_lastTradeDate == Server.Time.Date) // Если сделка была сегодня
-                        {
-                             DebugLog($"[DEBUG] Сделка по фракталу {fractal.Level:F5} совершена. Поиск других сделок сегодня прекращен.");
-                             return; // Выходим из CheckFractalsSweep и OnTick, если сделка была сегодня
-                        }
-                    }
-                    else
-                    {
-                        //DebugLog($"[DEBUG] Для свипнутого фрактала {fractal.Level:F5} (экстремум {fractal.SweepExtreme:F5}) слом структуры НЕ найден.");
-                    }
-                    anyFractalSweptThisTick = true; // Фрактал уже был свипнут, продолжаем его "вести"
-                    continue; // Переходим к следующему фракталу в _asianFractals
+                    // Additional logic after a sweep can be placed here if needed immediately
                 }
-
-                // Исторический свип (если не было мгновенного на этом тике и фрактал еще не был помечен как свипнутый ранее)
-                if (!fractal.IsSwept) // Эта проверка важна, чтобы не перезаписывать SweepExtreme от мгновенного свипа
-                {
-                    for (int i = 0; i < Math.Min(300, _m3Bars.Count); i++) // Проверяем последние N M3 баров
-                    {
-                        var barTime = _m3Bars.OpenTimes.Last(i);
-                        var m3Low = _m3Bars.LowPrices.Last(i);
-                        var m3High = _m3Bars.HighPrices.Last(i);
-                        int barM3Index = _m3Bars.Count - 1 - i;
-
-                        bool isBarInAllowedSession = IsLondonOrFrankfurtSession(barTime);
-                        bool isBarOnFractalDate = barTime.Date == fractal.Time.Date; // Свип должен быть в день формирования фрактала
-
-                        // --- Логирование для отладки сессий и дат при историческом свипе ---
-                        if (Server.Time.Date == new DateTime(2025, 5, 14) && Server.Time.Hour == 9 && Server.Time.Minute >= 0 && Server.Time.Minute <= 5 && fractal.Time.Date == new DateTime(2025,5,14))
-                        {
-                            //DebugLog($"[HIST_SWEEP_SESS_CHECK 14.05 09:00-09:05] M3BarTime: {barTime}, InAllowedSess: {isBarInAllowedSession}, BarOnFractalDate: {isBarOnFractalDate} (FractalDate: {fractal.Time.Date})");
-                        }
-                        // --- Конец логирования для отладки ---
-
-                        // Восстанавливаем объявление shouldLogDetail
-                        bool shouldLogDetail = Server.Time.Date == new DateTime(2025, 5, 14) &&
-                                              Server.Time.Hour == 9 && (Server.Time.Minute >= 0 && Server.Time.Minute <= 10); // Время сервера (тика)
-                        
-                        if (isBarInAllowedSession && isBarOnFractalDate) // Пропускаем бары не в сессии или не в день фрактала
-                        {
-                            // Логирование M3 баров для свипа фрактала 1.11822 в районе 09:00-09:05 14.05.2025
-                            if (shouldLogDetail && i < 5) // Логируем только 5 последних M3 баров для краткости
-                            {
-                                Print($"[DETAIL_SWEEP_LOG {barTime:dd.MM.yyyy HH:mm:ss}] M3 Bar [{barM3Index}] O:{_m3Bars.OpenPrices.Last(i):F5} H:{m3High:F5} L:{m3Low:F5} C:{_m3Bars.ClosePrices.Last(i):F5}. Fractal Level: {fractal.Level:F5}. InFrankfurt: {IsInFrankfurtSession(barTime)}, InLondon: {IsInLondonSession(barTime)}");
-                            }
-
-                            if (trendContext == TrendContext.Bullish && m3Low < fractal.Level)
-                            {
-                                // Используем shouldLogDetail, если необходимо детализированное Print
-                                if (shouldLogDetail && Server.Time.Date == new DateTime(2025, 5, 14) && Math.Abs(fractal.Level - 1.11822) < Symbol.PipSize * 0.1) Print($"[SWEEP_CHECK_VALUES_DEBUG] HISTORICAL Bullish Sweep Check PASSED Session/Date: Fractal {fractal.Level:F5}, M3BarTime: {barTime:HH:mm:ss}, M3Low: {m3Low:F5}");
-                                
-                                fractal.IsSwept = true;
-                                fractal.SweepLevel = m3Low;
-                                fractal.SweepExtreme = m3Low; 
-                                fractal.SweepBarIndex = barM3Index;
-                                DebugLog($"[DEBUG 14.05.2025] HISTORICAL Bullish Sweep SET: Fractal {fractal.Level:F5} @ {fractal.Time}, SweepBarIndex: {fractal.SweepBarIndex.Value}, M3BarTime: {barTime:HH:mm:ss}, M3BarLow: {m3Low:F5}");
-                                fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; 
-                                anyFractalSweptThisTick = true;
-                                //DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (Low={m3Low:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
-                                break; 
-                            }
-                            else if (trendContext == TrendContext.Bearish && m3High > fractal.Level)
-                            {
-                                // Используем shouldLogDetail, если необходимо детализированное Print
-                                if (shouldLogDetail && Server.Time.Date == new DateTime(2025, 5, 14) && Math.Abs(fractal.Level - 1.11822) < Symbol.PipSize * 0.1) Print($"[SWEEP_CHECK_VALUES_DEBUG] HISTORICAL Bearish Sweep Check PASSED Session/Date: Fractal {fractal.Level:F5}, M3BarTime: {barTime:HH:mm:ss}, M3High: {m3High:F5}");
-
-                                fractal.IsSwept = true;
-                                fractal.SweepLevel = m3High;
-                                fractal.SweepExtreme = m3High; 
-                                fractal.SweepBarIndex = barM3Index;
-                                DebugLog($"[DEBUG 14.05.2025] HISTORICAL Bearish Sweep SET: Fractal {fractal.Level:F5} @ {fractal.Time}, SweepBarIndex: {fractal.SweepBarIndex.Value}, M3BarTime: {barTime:HH:mm:ss}, M3BarHigh: {m3High:F5}");
-                                fractal.LastBosCheckBarIndex = fractal.SweepBarIndex.Value; 
-                                anyFractalSweptThisTick = true;
-                                //DebugLog($"[DEBUG] Исторический СВИП фрактала {fractal.Level:F5} (время {fractal.Time}) M3 баром {barTime} (High={m3High:F5}). SweepExtreme установлен {fractal.SweepExtreme:F5}");
-                                break; 
-                            }
-                        }
-                        else
-                        {
-                             if (shouldLogDetail && i < 2) Print($"[SWEEP_CHECK_VALUES ServerT:{Server.Time:HH:mm:ss} M3BarOpenT:{barTime:HH:mm:ss}] m3LowOrHigh Relevant, fractalLevel={fractal.Level:F5}, ConditionMet?=False");
-                        }
-                    }
-                }
-                
-                // Если после всех проверок (мгновенный И исторический) для текущего фрактала IsSwept все еще true,
-                // и по нему не было входа, проверяем BOS.
-                // Это дублирует проверку BOS выше, но нужно если исторический свип только что произошел.
-                if (fractal.IsSwept && !fractal.EntryDone)
-                {
-                    var bosResult = Is3mStructureBreak(fractal, trendContext);
-                    if (bosResult.IsBreak)
-                    {
-                        DebugLog($"[DEBUG] СЛОМ СТРУКТУРЫ (после ист.свипа) подтвержден для фрактала {fractal.Level:F5} (свипнут на {fractal.SweepExtreme:F5}). Время слома: {bosResult.BreakTime}, Цена входа: {bosResult.EntryPrice:F5}");
-                        EnterPosition(trendContext == TrendContext.Bullish ? TradeType.Buy : TradeType.Sell, bosResult.EntryPrice, fractal);
-                        // fractal.EntryDone = true; // Помечается внутри EnterPosition
-                         if (_lastTradeDate == Server.Time.Date)
-                        {
-                             DebugLog($"[DEBUG] Сделка по фракталу {fractal.Level:F5} совершена. Поиск других сделок сегодня прекращен.");
-                             return; // Выходим из CheckFractalsSweep и OnTick
-                        }
-                    }
-                    else
-                    {
-                        //DebugLog($"[DEBUG] Для свипнутого фрактала {fractal.Level:F5} (экстремум {fractal.SweepExtreme:F5}) слом структуры НЕ найден (после ист. свипа).");
-                    }
-                    anyFractalSweptThisTick = true; // Подтверждаем, что есть активный свипнутый фрактал
-                }
-            } // конец foreach (var fractal in _asianFractals.Where(f => !f.EntryDone))
-
-            if (!anyFractalSweptThisTick)
-            {
-                //DebugLog("[DEBUG] Нет свипнутых фракталов, ожидание свипа");
             }
-            //else
-            //{
-            //    DebugLog("[DEBUG] Статус фракталов после проверки свипа:");
-            //    foreach (var f in _asianFractals.Where(fr => fr.IsSwept && !fr.EntryDone).Take(MaxTrackedFractals)) // Показываем только активные для отслеживания
-            //    {
-            //        DebugLog($"[DEBUG] Фрактал: {f.Level:F5}, время: {f.Time}, свипнут: {f.IsSwept}, свип-уровень: {f.SweepLevel:F5}, экстремум: {f.SweepExtreme:F5}, sweepBarIndex: {f.SweepBarIndex}");
-            //    }
-            //}
         }
 
         private class StructureBreakResult
@@ -1045,172 +947,115 @@ namespace cAlgo.Robots
 
         private StructureBreakResult Is3mStructureBreak(AsianFractal fractal, TrendContext trendContext)
         {
-            if (fractal == null || !fractal.IsSwept || !fractal.SweepLevel.HasValue || !fractal.SweepExtreme.HasValue || !fractal.SweepBarIndex.HasValue) 
-            { 
-                DebugLog("[DEBUG] Is3mStructureBreak: Некорректные данные по фракталу для проверки слома."); 
-                return new StructureBreakResult { IsBreak = false }; 
+            var result = new StructureBreakResult { IsBreak = false };
+            if (fractal == null || !fractal.IsSwept || fractal.BosLevel == null || fractal.SweepBarIndex == null)
+            {
+                //DebugLog($"[BOS_CHECK_SKIP] Fractal not ready for BOS check. IsSwept: {fractal?.IsSwept}, BosLevel: {fractal?.BosLevel}, SweepBarIndex: {fractal?.SweepBarIndex}");
+                return result;
             }
 
-            var m3 = _m3Bars;
-            // Ensure SweepBarIndex is valid before accessing m3.HighPrices or m3.LowPrices
-            if (fractal.SweepBarIndex.Value < 0 || fractal.SweepBarIndex.Value >= m3.Count)
+            var m3Bars = _m3Bars; //MarketData.GetBars(TimeFrame.Minute3);
+            if (m3Bars.Count < fractal.SweepBarIndex.Value + 2) // Need at least one bar after sweep bar
             {
-                DebugLog($"[DEBUG] Is3mStructureBreak: Некорректный SweepBarIndex ({fractal.SweepBarIndex.Value}) для фрактала {fractal.Level:F5}.");
-                return new StructureBreakResult { IsBreak = false };
-            }
-
-            // Определяем начальный бар для этого анализа.
-            // Мы хотим начать проверку с бара, следующего за последним проверенным,
-            // или с бара, следующего за баром свипа, если это первая проверка BOS после свипа.
-            int startBarToAnalyze = fractal.LastBosCheckBarIndex + 1;
-            // Убедимся, что не начинаем раньше или на самом баре свипа. Минимум это SweepBarIndex + 1.
-            if (startBarToAnalyze <= fractal.SweepBarIndex.Value)
-            {
-                startBarToAnalyze = fractal.SweepBarIndex.Value + 1;
-            }
-
-            if (m3.Count <= startBarToAnalyze) // Нет новых баров для проверки с последнего раза или после свипа
-            {
-                return new StructureBreakResult { IsBreak = false };
+                //DebugLog($"[BOS_CHECK_SKIP] Not enough M3 bars after sweep bar for BOS check. M3Bars: {m3Bars.Count}, SweepBarIndex: {fractal.SweepBarIndex.Value}");
+                return result;
             }
             
-            // DebugLog($"[DEBUG] Is3mStructureBreak: Проверка слома для фрактала {fractal.Level:F5} ({fractal.Time}), свип экстремум SL: {fractal.SweepExtreme.Value:F5}, тренд: {trendContext}");
-            // sweepExtremeLevel (который fractal.SweepExtreme.Value) используется для SL.
-            // Для BOS мы используем High/Low бара свипа.
+            // Start checking from the bar AFTER the sweep bar up to the latest completed bar
+            // The sweep bar itself cannot be the BOS bar with this logic (Close > its own High/Low)
+            // SweepBarIndex is 0-based index of the bar that performed the sweep.
+            // So, the first potential BOS bar is at index SweepBarIndex + 1.
+            // m3Bars.Count - 1 is the index of the latest completed bar.
+            int firstPotentialBosBarIndex = fractal.SweepBarIndex.Value + 1;
 
-            // Итерируем M3 бары НАЧИНАЯ СО СЛЕДУЮЩЕГО после бара, который сделал свип
-            for (int barIndexOffset = startBarToAnalyze; barIndexOffset < m3.Count; barIndexOffset++)
+            // We should only check new bars for BOS
+            int startIndexToCheck = Math.Max(firstPotentialBosBarIndex, fractal.LastBosCheckBarIndex + 1);
+
+            for (int i = startIndexToCheck; i < m3Bars.Count; i++)
             {
-                var barTime = m3.OpenTimes[barIndexOffset]; // Это время открытия бара-кандидата на BOS
-                var close = m3.ClosePrices[barIndexOffset];
-                var high = m3.HighPrices[barIndexOffset];
-                var low = m3.LowPrices[barIndexOffset];
-                // var sweepExtremeLevel = fractal.SweepExtreme.Value; // Это для SL
+                var candidateBar = m3Bars[i];
+                fractal.LastBosCheckBarIndex = i; // Update last checked bar index
 
-                // --- НАЧАЛО: Детальное логирование OHLC для целевого сценария ---
-                if (Server.Time.Date == new DateTime(2025, 5, 14) &&
-                    fractal.SweepBarIndex.HasValue && // Убедимся, что индекс бара свипа установлен
-                    Math.Abs(fractal.Level - 1.11822) < Symbol.PipSize * 2.0) // Приближение для уровня фрактала
+                // Debug specific bar if it matches
+                if (candidateBar.OpenTime == _debugSpecificTimestamp && !_loggedSpecificBarDataThisInstance)
                 {
-                    var sweepBarOpenTime = m3.OpenTimes[fractal.SweepBarIndex.Value];
-                    var bosCandidateBarOpenTime = barTime; // barTime - это m3.OpenTimes[barIndexOffset]
-
-                    // Логируем, если кандидат на BOS находится в интересующем нас временном окне (например, 09:00 - 09:20)
-                    if (bosCandidateBarOpenTime.Hour == 9 && bosCandidateBarOpenTime.Minute >= 0 && bosCandidateBarOpenTime.Minute <= 20)
-                    {
-                        Print($"[USER_TARGET_LOG 14.05.2025] OHLC Data Check (Fractal: {fractal.Level:F5})");
-                        Print($"    Sweep Bar (Index {fractal.SweepBarIndex.Value}, Time {sweepBarOpenTime:HH:mm}): " +
-                              $"O={m3.OpenPrices[fractal.SweepBarIndex.Value]:F5}, " +
-                              $"H={m3.HighPrices[fractal.SweepBarIndex.Value]:F5}, " +
-                              $"L={m3.LowPrices[fractal.SweepBarIndex.Value]:F5}, " +
-                              $"C={m3.ClosePrices[fractal.SweepBarIndex.Value]:F5}");
-                        Print($"    BOS Candidate Bar (Index {barIndexOffset}, Time {bosCandidateBarOpenTime:HH:mm}): " +
-                              $"O={m3.OpenPrices[barIndexOffset]:F5}, " +
-                              $"H={m3.HighPrices[barIndexOffset]:F5}, " +
-                              $"L={m3.LowPrices[barIndexOffset]:F5}, " +
-                              $"C={m3.ClosePrices[barIndexOffset]:F5}");
-                        Print($"    Calculated levelToBreak for this BOS check: {m3.HighPrices[fractal.SweepBarIndex.Value]:F5}");
-                    }
-                }
-                // --- КОНЕЦ: Детальное логирование OHLC ---
-
-                // Обновляем LastBosCheckBarIndex на текущий обрабатываемый бар *перед* любыми continue или return.
-                // Это гарантирует, что этот бар не будет повторно обработан для этого фрактала в последующих вызовах.
-                fractal.LastBosCheckBarIndex = barIndexOffset;
-
-                // Проверяем, что бар находится в нужной сессии (Франкфурт или Лондон)
-                if (!(IsInFrankfurtSession(barTime) || IsInLondonSession(barTime)))
-                {
-                    // DebugLog($"[DEBUG] Is3mStructureBreak: Бар {barIndexOffset} ({barTime:HH:mm}) вне сессии Франкфурта/Лондона. Пропуск.");
-                    continue; 
-                }
-                
-                bool currentBarConfirmsBOS = false;
-                double levelToBreak = 0; // Инициализируем, чтобы компилятор не ругался
-
-                if (trendContext == TrendContext.Bullish)
-                {
-                    levelToBreak = m3.HighPrices[fractal.SweepBarIndex.Value]; // High бара свипа
-                    DebugLog($"[DEBUG] Is3mStructureBreak (Bullish): Анализ M3 бара [{barIndexOffset}] Close:{close:F5} Time:{barTime:HH:mm} vs SweepBarHigh:{levelToBreak:F5} (Fractal: {fractal.Level:F5}, SweepExtremeForSL: {fractal.SweepExtreme.Value:F5})");
-                    if (close > levelToBreak)
-                    {
-                        currentBarConfirmsBOS = true;
-                    }
-                }
-                else if (trendContext == TrendContext.Bearish)
-                {
-                    levelToBreak = m3.LowPrices[fractal.SweepBarIndex.Value]; // Low бара свипа
-                    DebugLog($"[DEBUG] Is3mStructureBreak (Bearish): Анализ M3 бара [{barIndexOffset}] Close:{close:F5} Time:{barTime:HH:mm} vs SweepBarLow:{levelToBreak:F5} (Fractal: {fractal.Level:F5}, SweepExtremeForSL: {fractal.SweepExtreme.Value:F5})");
-                    if (close < levelToBreak)
-                    {
-                        currentBarConfirmsBOS = true;
-                    }
+                     DebugLog($"[DEBUG_OHLC_BAR_SPECIFIC_FOR_BOS_CHECK] Target Time: {_debugSpecificTimestamp}. Bar {candidateBar.OpenTime} (Index {i}) O:{candidateBar.Open} H:{candidateBar.High} L:{candidateBar.Low} C:{candidateBar.Close} Vol:{candidateBar.TickVolume}. Checking against BOS level: {fractal.BosLevel}");
+                    _loggedSpecificBarDataThisInstance = true; // Log only once per OnTick instance for this specific bar
                 }
 
-                if (currentBarConfirmsBOS)
+                if (trendContext == TrendContext.Bullish || TrendMode == ManualTrendMode.Bullish)
                 {
-                    double bosDistancePips = 0;
-                    if (trendContext == TrendContext.Bullish) {
-                        bosDistancePips = (close - levelToBreak) / Symbol.PipSize;
-                    } else { // Bearish
-                        bosDistancePips = (levelToBreak - close) / Symbol.PipSize;
-                    }
-
-                    if (bosDistancePips <= MaxBOSDistancePips)
+                    // BOS Level for Bullish is High of the sweep bar
+                    if (candidateBar.Low > fractal.BosLevel.Value)
                     {
-                        if (trendContext == TrendContext.Bullish)
+                        double distanceToBosLevelPips = (candidateBar.Close - fractal.BosLevel.Value) / Symbol.PipSize;
+                        DebugLog($"[BOS_DEBUG_BULL] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close} vs BOS Level (SweepBarHigh): {fractal.BosLevel.Value}. Dist: {distanceToBosLevelPips:F1} pips.");
+
+                        if (distanceToBosLevelPips <= MaxBOSDistancePips)
                         {
-                            DebugLog($"[DEBUG] Is3mStructureBreak: СЛОМ СТРУКТУРЫ ВВЕРХ (Bullish) ПОДТВЕРЖДЕН И В ДОПУСКЕ. M3 бар [{barIndexOffset}] закрылся ({close:F5}) > High бара свипа ({levelToBreak:F5}) в {barTime:HH:mm}. Дистанция: {bosDistancePips:F1} пипсов (Макс: {MaxBOSDistancePips:F1}).");
+                            result.IsBreak = true;
+                            result.EntryPrice = candidateBar.Close; // Or Open of next bar, for now, Close of confirming bar
+                            result.BreakTime = candidateBar.OpenTime;
+                            DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} > BOS Level: {fractal.BosLevel.Value}. Entry at market.");
+                            return result; // BOS found
                         }
-                        else // Bearish
+                        else
                         {
-                            DebugLog($"[DEBUG] Is3mStructureBreak: СЛОМ СТРУКТУРЫ ВНИЗ (Bearish) ПОДТВЕРЖДЕН И В ДОПУСКЕ. M3 бар [{barIndexOffset}] закрылся ({close:F5}) < Low бара свипа ({levelToBreak:F5}) в {barTime:HH:mm}. Дистанция: {bosDistancePips:F1} пипсов (Макс: {MaxBOSDistancePips:F1}).");
+                            DebugLog($"[BOS_REJECT_BULL] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
+                            fractal.EntryDone = true; // Invalidate fractal if BOS is too far
+                            return result; // Stop checking for this fractal
                         }
+                    }
+                }
+                else if (trendContext == TrendContext.Bearish || TrendMode == ManualTrendMode.Bearish)
+                {
+                    // BOS Level for Bearish is Low of the sweep bar
+                    if (candidateBar.Close < fractal.BosLevel.Value)
+                    {
+                        double distanceToBosLevelPips = (fractal.BosLevel.Value - candidateBar.Close) / Symbol.PipSize;
+                        DebugLog($"[BOS_DEBUG_BEAR] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close} vs BOS Level (SweepBarLow): {fractal.BosLevel.Value}. Dist: {distanceToBosLevelPips:F1} pips.");
                         
-                        // --- Логирование для 14.05.2025 ---
-                        if (Server.Time.Date == new DateTime(2025, 5, 14) && Math.Abs(fractal.Level - 1.11832) < Symbol.PipSize * 0.5)
+                        if (distanceToBosLevelPips <= MaxBOSDistancePips)
                         {
-                            DebugLog($"[USER_TARGET_LOG 14.05.2025] Is3mStructureBreak (тренд {trendContext}) для азиатского фрактала ~1.11832:");
-                            DebugLog($"    > Бот: СЛОМ СТРУКТУРЫ! Время: {barTime:HH:mm:ss}, Цена закрытия (вход): {close:F5}, Дистанция от уровня BOS: {bosDistancePips:F1} пипсов.");
-                            DebugLog($"    > Ожидание: Слом в ~09:18 UTC+3, Цена входа ~1.11913.");
+                            result.IsBreak = true;
+                            result.EntryPrice = candidateBar.Close;
+                            result.BreakTime = candidateBar.OpenTime;
+                            DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} < BOS Level: {fractal.BosLevel.Value}. Entry at market.");
+                            return result; // BOS found
                         }
-                        // --- Конец логирования для 14.05.2025 ---
-                        return new StructureBreakResult { IsBreak = true, EntryPrice = close, BreakTime = barTime };
-                    }
-                    else
-                    {
-                        DebugLog($"[DEBUG] Is3mStructureBreak: Слом структуры на M3 баре [{barIndexOffset}] ({barTime:HH:mm}) ПРОПУЩЕН. Закрытие {close:F5} слишком далеко ({bosDistancePips:F1} пипсов) от уровня слома {levelToBreak:F5}. Макс. допустимо: {MaxBOSDistancePips:F1} пипсов. Ищем дальше...");
-                        // Не возвращаем, цикл продолжится для следующего бара barIndexOffset
+                        else
+                        {
+                             DebugLog($"[BOS_REJECT_BEAR] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
+                            fractal.EntryDone = true; // Invalidate fractal if BOS is too far
+                            return result; // Stop checking for this fractal
+                        }
                     }
                 }
             }
-            
-            // Логируем это сообщение "не найдено", только если мы действительно проитерировали какие-то новые бары в этом вызове.
-            if (startBarToAnalyze < m3.Count) // подразумевает, что цикл выполнялся или хотя бы пытался выполниться
-            {
-                 DebugLog($"[DEBUG] Is3mStructureBreak: Слом структуры не обнаружен (или все допустимые были слишком далеко) в новых барах [{startBarToAnalyze} до {m3.Count -1}] для фрактала {fractal.Level:F5}.");
-            }
-            return new StructureBreakResult { IsBreak = false };
+            return result; // No BOS found on checked bars
         }
 
         private bool IsInAsiaSession(DateTime time)
         {
-            int hour = time.Hour;
-            return hour >= 0 && hour < 9;
+            int hour = time.Hour; // time is expected to be UTC
+            // Asia session 00:00-09:00 local time (e.g. UTC+3) corresponds to 21:00 (previous day) - 06:00 UTC.
+            // The current implementation hour >= 0 && hour < 6 covers 00:00-05:59 UTC.
+            // This definition means Asian session ends just as Frankfurt UTC starts.
+            return hour >= 0 && hour < 6; 
         }
         private bool IsInFrankfurtSession(DateTime time)
         {
-            // Франкфурт: 09:00 - 10:00 UTC+3 (точно по минутам)
-            var start = new DateTime(time.Year, time.Month, time.Day, 9, 0, 0);
-            var end = new DateTime(time.Year, time.Month, time.Day, 10, 0, 0);
-            return time >= start && time < end;
+            // Frankfurt: 09:00 - 10:00 local time (e.g. UTC+3)
+            // Corresponds to 06:00 - 07:00 UTC
+            int hour = time.Hour; // time is UTC
+            return hour >= 6 && hour < 7;
         }
         private bool IsInLondonSession(DateTime time)
         {
-            // Лондон: 10:00 - 15:00 UTC+3 (точно по минутам)
-            var start = new DateTime(time.Year, time.Month, time.Day, 10, 0, 0);
-            var end = new DateTime(time.Year, time.Month, time.Day, 15, 0, 0);
-            return time >= start && time < end;
+            // London: 10:00 - 15:00 local time (e.g. UTC+3)
+            // Corresponds to 07:00 - 12:00 UTC
+            int hour = time.Hour; // time is UTC
+            return hour >= 7 && hour < 12;
         }
 
         // Добавим новый метод для поиска ключевых уровней

@@ -6,7 +6,7 @@ Live H3M Trading Bot for cTrader
 
 This script will be the main entry point for the live trading bot.
 It will:
-1. Initialize the CTraderApiClient (from ctrader_api_client.py).
+1. Initialize the CTraderApiClient (from live_ctrader_api_client.py).
 2. Connect to the cTrader Open API.
 3. Implement the main trading loop:
     a. Receive real-time market data (spot prices).
@@ -27,7 +27,7 @@ import time # Standard time module
 # from datetime import datetime, timedelta # If needed for bar construction or timing
 
 # Will import CTraderApiClient and strategy logic components
-# from ctrader_api_client import CTraderApiClient
+# from live_ctrader_api_client import CTraderApiClient # Corrected import name
 # from h3m_strategy_core import ... (core strategy functions if refactored)
 # Or, initially, might re-implement/adapt parts of h3m_bot.py logic here or call its functions carefully
 
@@ -106,7 +106,7 @@ async def main_live_trader():
         print("Live trader shut down.")
 
 if __name__ == "__main__":
-    print(" live_h3m_trader.py executed directly. "
+    print(" live_trading.py executed directly. " # Updated filename in print
           "This will be the main script for the live bot.")
     try:
         asyncio.run(main_live_trader())

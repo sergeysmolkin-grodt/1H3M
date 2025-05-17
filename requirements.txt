@@ -3,3 +3,4 @@ pandas
 python-dateutil
 matplotlib
 mplfinance 
+ctrader-open-api

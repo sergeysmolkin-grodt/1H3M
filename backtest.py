@@ -1,3 +1,7 @@
+# --- Bot Configuration & Parameters --- (Mainly for Backtesting) ---
+# This script is primarily designed for backtesting the H3M strategy.
+# For live trading, see live_h3m_trader.py and ctrader_api_client.py
+
 import pandas as pd
 from datetime import time, datetime, timedelta
 import pytz # For timezone handling
@@ -1200,7 +1204,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
 
 
 if __name__ == '__main__':
-    import data_fetcher
+    import backtest_data
     import config
 
     parser = argparse.ArgumentParser(description="H3M Bot Backtester")
@@ -1236,7 +1240,7 @@ if __name__ == '__main__':
 
         # 1. Fetch Data
         print("\nFetching H1 data...")
-        h1_data = data_fetcher.get_historical_data(
+        h1_data = backtest_data.get_historical_data(
             symbol_to_trade, "1h", 
             h1_fetch_start_date_str, # Use extended start date for H1
             user_backtest_end_date_str,  # Use user-defined end date for H1
@@ -1245,7 +1249,7 @@ if __name__ == '__main__':
         sleep_timer.sleep(1) 
 
         print("\nFetching M5 data...")
-        m5_data = data_fetcher.get_historical_data(
+        m5_data = backtest_data.get_historical_data(
             symbol_to_trade, "5min", 
             user_backtest_start_date_str, # Use user-defined start for M5
             user_backtest_end_date_str,   # Use user-defined end for M5

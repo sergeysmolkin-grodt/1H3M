@@ -11,15 +11,22 @@ MIN_RR = 1.3                # Minimum Risk/Reward ratio
 MAX_RR = 5.0                # Maximum Risk/Reward ratio
 MAX_BOS_DISTANCE_PIPS = 15.0 # Maximum distance for BOS confirmation in pips
 H1_FRACTAL_PERIOD = 2 # Period for H1 fractal identification (N bars on each side, e.g., 2 means center of 5 bars)
+ASIA_H1_FRACTAL_PERIOD = 1 # For 3-bar Asian session H1 fractals (1 bar on each side)
 
 PIP_SIZE_DEFAULT = 0.0001     # For EURUSD like pairs
 PIP_SIZE_JPY = 0.01         # For JPY pairs
 
+# --- Enums / Constants ---
+class TrendContext:
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    NEUTRAL = "neutral"
+
 # Global state variables (аналогично вашим переменным в C#)
-asia_high = None
-asia_low = None
-asia_high_time = None
-asia_low_time = None
+# asia_high = None # Removed as unused
+# asia_low = None # Removed as unused
+asia_high_time = None # Will store time of the identified Asia High Fractal
+asia_low_time = None # Will store time of the identified Asia Low Fractal
 
 fractal_level_asia_high = None
 fractal_level_asia_low = None
@@ -41,8 +48,8 @@ last_trade_execution_date = None # Tracks the date of the last executed trade to
 # --- Session Times (UTC) ---
 # Asia Session (примерно 00:00 - 06:00 UTC, но фракталы ищем до 05:00 UTC H1 свечи)
 ASIA_START_HOUR_UTC = 0
-ASIA_END_HOUR_UTC = 6 # Сессия длится до этого часа, но фракталы по свечам ДО этого часа
-ASIA_FRACTAL_EVAL_HOUR_UTC_EXCLUSIVE = 5 # H1 свечи *до* этого часа (т.е. 00,01,02,03,04) используются для поиска фрактала
+ASIA_END_HOUR_UTC = 6 # Сессия длится до этого часа, но фракталы по свечам ДО этого часа. This might be just a comment for general Asia session.
+ASIA_FRACTAL_EVAL_HOUR_UTC_EXCLUSIVE = 9 # H1 свечи *до* этого часа (т.е. 00,01,..08) используются для поиска фрактала
 
 # Frankfurt Session (06:00 - 07:00 UTC для "первого часа")
 FRANKFURT_SESSION_START_HOUR_UTC = 6
@@ -91,8 +98,8 @@ def reset_daily_states():
     global bos_level_to_break_high, bos_level_to_break_low
     
     print("[STATE_RESET] Resetting daily states.")
-    asia_high = None
-    asia_low = None
+    # asia_high = None # Removed
+    # asia_low = None # Removed
     asia_high_time = None
     asia_low_time = None
     fractal_level_asia_high = None
@@ -259,41 +266,184 @@ def calculate_take_profit(trade_type: str, entry_price: float, sl_price: float,
         print(f"[TP_CALC] No H1 fractals found for TP. No valid TP.")
         return None, 0
     
-# --- Placeholder for Core Logic --- 
-def find_asia_fractals(h1_bars):
+# --- Trend Determination Functions ---
+def determine_h1_trend_context(h1_data: pd.DataFrame, pip_size: float, symbol_name: str = "EURUSD") -> str:
     """
-    Identifies the highest high and lowest low during the Asian session 
-    from H1 bars up to ASIA_FRACTAL_EVAL_HOUR_UTC_EXCLUSIVE.
-    These will be our initial fractal_level_asia_high/low.
+    Determines H1 trend context based on bar counts, momentum, and structure.
+    Analogous to SimpleTrendContext in C#.
     """
-    global asia_high, asia_low, asia_high_time, asia_low_time
-    global fractal_level_asia_high, fractal_level_asia_low
+    if h1_data is None or len(h1_data) < 25:
+        print("[TREND_H1] Not enough H1 data to determine trend (< 25 bars).")
+        return TrendContext.NEUTRAL
 
-    # Filter for relevant Asian session bars
-    # Assuming h1_bars is a DataFrame indexed by datetime
-    asia_h1_bars = h1_bars[h1_bars.index.to_series().apply(is_in_asia_session_for_fractal_search)]
+    h1_recent_25 = h1_data.iloc[-25:] # Last 25 bars
+    h1_recent_10 = h1_data.iloc[-10:] # Last 10 bars for structure
+    h1_recent_5 = h1_data.iloc[-5:]   # Last 5 bars for impulse
 
-    if asia_h1_bars.empty:
-        # print("[ASIA_FRACTAL] No H1 bars found in Asia session for fractal search.")
+    # 1. Bar counting
+    bullish_bars = 0
+    bearish_bars = 0
+    for _, bar in h1_recent_25.iterrows():
+        if bar['close'] > bar['open']:
+            bullish_bars += 1
+        elif bar['close'] < bar['open']:
+            bearish_bars += 1
+    
+    # 2. Impulse check (last 5 bars, > 40 pips)
+    impulse_threshold_pips = 40
+    recent_movement_pips = (h1_recent_5.iloc[-1]['close'] - h1_recent_5.iloc[0]['open']) / pip_size
+    strong_bullish_impulse = recent_movement_pips > impulse_threshold_pips
+    strong_bearish_impulse = recent_movement_pips < -impulse_threshold_pips
+
+    # 3. Structure check (HH/HL or LL/LH over last 10 bars)
+    has_higher_highs = False
+    has_higher_lows = False
+    has_lower_lows = False
+    has_lower_highs = False
+
+    if len(h1_recent_10) >= 2: # Need at least 2 bars to compare for structure
+        # Check for Higher Highs and Higher Lows
+        # Simplified: check if last high is > prev high, and last low is > prev low, etc.
+        # More robust: look for series of HH/HL or LL/LH
+        # For simplicity, let's check if the last few highs are generally increasing and lows are increasing
+        # This is a simplification of the C# logic which used prevHigh/prevLow iteratively.
+        # C# loop: for (int i = 9; i >= 0; i--) ... prevHigh = _h1Bars.HighPrices[last - i];
+        # Python equivalent will iterate through h1_recent_10
+        
+        prev_high = h1_recent_10.iloc[0]['high']
+        prev_low = h1_recent_10.iloc[0]['low']
+        consecutive_hh = 0
+        consecutive_hl = 0
+        consecutive_ll = 0
+        consecutive_lh = 0
+
+        for i in range(1, len(h1_recent_10)):
+            current_high = h1_recent_10.iloc[i]['high']
+            current_low = h1_recent_10.iloc[i]['low']
+            
+            if current_high > prev_high: consecutive_hh +=1 
+            else: consecutive_hh = 0 # Reset if not higher
+                
+            if current_low > prev_low: consecutive_hl +=1
+            else: consecutive_hl = 0
+            
+            if current_low < prev_low: consecutive_ll +=1
+            else: consecutive_ll = 0
+                
+            if current_high < prev_high: consecutive_lh +=1
+            else: consecutive_lh = 0
+
+            prev_high = current_high
+            prev_low = current_low
+            
+        # Consider structure valid if we have at least 2-3 consecutive HH/HL or LL/LH
+        # This is an interpretation of the C# logic which set flags like hasHigherHighs = true on any occurrence.
+        # Let's use a threshold, e.g., if at least half of the recent 10 bars showed this pattern.
+        # C# logic: `if (_h1Bars.HighPrices[last - i] > prevHigh) { hasHigherHighs = true; }`
+        # This means any single HH in the last 10 bars would set the flag.
+        # We will replicate this simpler logic first.
+
+        # Reset for direct C# logic replication
+        prev_high = h1_recent_10.iloc[0]['high']
+        prev_low = h1_recent_10.iloc[0]['low']
+        for i in range(1, len(h1_recent_10)):
+            if h1_recent_10.iloc[i]['high'] > prev_high: has_higher_highs = True
+            if h1_recent_10.iloc[i]['low'] > prev_low: has_higher_lows = True
+            if h1_recent_10.iloc[i]['low'] < prev_low: has_lower_lows = True
+            if h1_recent_10.iloc[i]['high'] < prev_high: has_lower_highs = True
+            prev_high = h1_recent_10.iloc[i]['high']
+            prev_low = h1_recent_10.iloc[i]['low']
+
+    # 4. Decision making (mimicking C# SimpleTrendContext)
+    trend_decision = TrendContext.NEUTRAL
+    if (bullish_bars > bearish_bars + 5) or (has_higher_highs and has_higher_lows) or strong_bullish_impulse:
+        trend_decision = TrendContext.BULLISH
+    elif (bearish_bars > bullish_bars + 5) or (has_lower_lows and has_lower_highs) or strong_bearish_impulse:
+        trend_decision = TrendContext.BEARISH
+    
+    print(f"[TREND_H1] Determined for {h1_data.index[-1].date()}: {trend_decision}. Bars B/M: {bullish_bars}/{bearish_bars}, Impulse:{recent_movement_pips:.1f} pips, HH:{has_higher_highs}, HL:{has_higher_lows}, LL:{has_lower_lows}, LH:{has_lower_highs}")
+    return trend_decision
+
+# --- Core Logic Functions (find_asia_fractals, check_sweep, check_bos) ---
+def find_asia_fractals(h1_bars: pd.DataFrame, trend_h1: str):
+    """
+    Identifies the Asian session High/Low fractals based on H1 trend, using a 3-bar fractal definition.
+    If trend_h1 is BULLISH, primarily looks for Asia Low Fractal (for potential buy setups).
+    If trend_h1 is BEARISH, primarily looks for Asia High Fractal (for potential sell setups).
+    If trend_h1 is NEUTRAL, finds both (though NEUTRAL days are typically skipped for trading).
+    Fractals are identified on H1 bars whose open time is within the ASIA_FRACTAL_EVAL_HOUR_UTC_EXCLUSIVE window.
+    The highest Up-Fractal and lowest Down-Fractal from this period are selected.
+    """
+    global fractal_level_asia_high, fractal_level_asia_low, asia_high_time, asia_low_time
+    # Reset before finding new ones for the day
+    fractal_level_asia_high = None
+    fractal_level_asia_low = None
+    asia_high_time = None
+    asia_low_time = None
+
+    # Filter H1 bars for the Asian session fractal evaluation window
+    # is_in_asia_session_for_fractal_search uses ASIA_START_HOUR_UTC and ASIA_FRACTAL_EVAL_HOUR_UTC_EXCLUSIVE
+    asia_h1_bars_for_fractal_search = h1_bars[h1_bars.index.to_series().apply(is_in_asia_session_for_fractal_search)]
+
+    if asia_h1_bars_for_fractal_search.empty or len(asia_h1_bars_for_fractal_search) < (2 * ASIA_H1_FRACTAL_PERIOD + 1):
+        required_bars = 2 * ASIA_H1_FRACTAL_PERIOD + 1
+        print(f"[ASIA_FRACTAL] Not enough H1 bars ({len(asia_h1_bars_for_fractal_search)}) in Asia session for {required_bars}-bar fractal search.")
         return
 
-    current_asia_high = asia_h1_bars['high'].max()
-    current_asia_low = asia_h1_bars['low'].min()
-    
-    # Store the actual levels that will be used as fractals
-    fractal_level_asia_high = current_asia_high
-    fractal_level_asia_low = current_asia_low
-    
-    # For logging/tracking, find the times of these extremes
-    # If multiple bars have the same high/low, take the first one (though time doesn't strictly matter for the level itself)
-    asia_high_bar = asia_h1_bars[asia_h1_bars['high'] == current_asia_high].iloc[0]
-    asia_low_bar = asia_h1_bars[asia_h1_bars['low'] == current_asia_low].iloc[0]
-    
-    asia_high_time = asia_high_bar.name # Index is datetime
-    asia_low_time = asia_low_bar.name
+    current_day_str = asia_h1_bars_for_fractal_search.index.min().date() # Date of the first bar in the asia session window
 
-    print(f"[ASIA_FRACTAL] Asia H1 Fractals for {asia_h1_bars.index.min().date()}: High={fractal_level_asia_high} at {asia_high_time}, Low={fractal_level_asia_low} at {asia_low_time}")
+    # Find all 3-bar fractals (ASIA_H1_FRACTAL_PERIOD = 1) within this subset of H1 bars
+    # _find_h1_fractals returns (price, datetime) tuples
+    up_fractals, down_fractals = _find_h1_fractals(asia_h1_bars_for_fractal_search, fractal_lookback_period=ASIA_H1_FRACTAL_PERIOD)
 
+    identified_asia_high = None
+    identified_asia_high_time = None
+    if up_fractals:
+        identified_asia_high = max(f[0] for f in up_fractals) # Get the highest price among up-fractals
+        # Get the time of the first occurrence of this max high, if multiple fractals hit the same high
+        identified_asia_high_time = next((f[1] for f in up_fractals if f[0] == identified_asia_high), None)
+        
+    identified_asia_low = None
+    identified_asia_low_time = None
+    if down_fractals:
+        identified_asia_low = min(f[0] for f in down_fractals) # Get the lowest price among down-fractals
+        identified_asia_low_time = next((f[1] for f in down_fractals if f[0] == identified_asia_low), None)
+
+    log_msg_parts = [f"[ASIA_FRACTAL] Evaluated Asia H1 fractals ({ASIA_H1_FRACTAL_PERIOD*2+1}-bar) for {current_day_str}:"]
+    if identified_asia_high and identified_asia_high_time:
+        log_msg_parts.append(f" Identified Asia High Fractal: {identified_asia_high:.5f} at {identified_asia_high_time}.")
+    else:
+        log_msg_parts.append(" No valid Up-Fractal found in Asia session.")
+    
+    if identified_asia_low and identified_asia_low_time:
+        log_msg_parts.append(f" Identified Asia Low Fractal: {identified_asia_low:.5f} at {identified_asia_low_time}.")
+    else:
+        log_msg_parts.append(" No valid Down-Fractal found in Asia session.")
+
+    if trend_h1 == TrendContext.BULLISH:
+        if identified_asia_low and identified_asia_low_time:
+            fractal_level_asia_low = identified_asia_low
+            asia_low_time = identified_asia_low_time
+            log_msg_parts.append(f" Trend is BULLISH, focusing on Asia Low Fractal: {fractal_level_asia_low:.5f}")
+        else:
+            log_msg_parts.append(" Trend is BULLISH, but no Asia Low Fractal found or its time is missing.")
+    elif trend_h1 == TrendContext.BEARISH:
+        if identified_asia_high and identified_asia_high_time:
+            fractal_level_asia_high = identified_asia_high
+            asia_high_time = identified_asia_high_time
+            log_msg_parts.append(f" Trend is BEARISH, focusing on Asia High Fractal: {fractal_level_asia_high:.5f}")
+        else:
+            log_msg_parts.append(" Trend is BEARISH, but no Asia High Fractal found or its time is missing.")
+    elif trend_h1 == TrendContext.NEUTRAL: # Neutral days are currently skipped in process_bar_data
+        if identified_asia_high and identified_asia_high_time:
+            fractal_level_asia_high = identified_asia_high
+            asia_high_time = identified_asia_high_time
+        if identified_asia_low and identified_asia_low_time:
+            fractal_level_asia_low = identified_asia_low
+            asia_low_time = identified_asia_low_time
+        log_msg_parts.append(f" Trend is NEUTRAL. Asia High Fractal: {fractal_level_asia_high}, Low Fractal: {fractal_level_asia_low}")
+    
+    print("".join(log_msg_parts))
 
 def check_sweep(m5_bar):
     """Checks if the current M5 bar sweeps an Asian fractal."""
@@ -399,7 +549,7 @@ def check_bos(m5_bar, pip_size=0.0001):
             
     return False, None
 
-
+# --- Main Processing Loop ---
 def process_bar_data(h1_dataframe, m5_dataframe, symbol):
     """ 
     Main loop to process historical data bar by bar.
@@ -438,22 +588,40 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
             print(f"[PROCESS_BAR_DATA] Trade already executed on {current_processing_date}. Skipping further processing for this date.")
             continue
 
-        # 1. Identify Asia Fractals for the current_processing_date using H1 bars up to that day
-        # We need H1 bars of current_processing_date for Asia session.
-        # The H1 bars should be available before M5 bars of the same session.
+        # 1. Determine H1 Trend Context for the current day
+        # We need H1 data up to the start of current_processing_date to determine trend for it.
+        h1_data_for_trend = h1_dataframe[h1_dataframe.index.date < current_processing_date]
+        # Or, if we want to use data *of* the current day up to Asia, it's more complex.
+        # For simplicity, let's use data *before* the current day to establish a daily bias.
+        # C# logic for trend was often on _h1Bars.Last(x) which implies current data.
+        # Let's use H1 data available *at the beginning* of current_processing_date.
+        # This usually means all H1 bars whose open time is < current_processing_date 00:00:00.
+        # Or, more practically, all H1 data up to the end of the *previous* trading day.
+        # For a daily trend, it's often set at market open or after Asia.
+        # Let's take all H1 data *up to the current processing date's Asia session start time*.
+        end_of_prev_day_for_trend = pd.Timestamp(current_processing_date).replace(hour=0, minute=0, second=0, microsecond=0)
+        h1_data_for_trend_calc = h1_dataframe[h1_dataframe.index < end_of_prev_day_for_trend]
+
+        current_h1_trend = determine_h1_trend_context(h1_data_for_trend_calc, pip_size, symbol)
+
+        if current_h1_trend == TrendContext.NEUTRAL:
+            print(f"[PROCESS_BAR_DATA] H1 Trend is NEUTRAL for {current_processing_date}. Skipping trading for this day.")
+            continue
+
+        # 2. Identify Asia Fractals based on H1 trend
         h1_bars_for_asia_today = h1_dataframe[h1_dataframe.index.date == current_processing_date]
         if not h1_bars_for_asia_today.empty:
-            find_asia_fractals(h1_bars_for_asia_today)
+            find_asia_fractals(h1_bars_for_asia_today, current_h1_trend)
         else:
             print(f"[PROCESS_BAR_DATA] No H1 data for {current_processing_date} to find Asia fractals.")
             # Potentially load more H1 data if needed, or skip if it implies no trading day
 
         # If no fractals were found (e.g. weekend, holiday, missing data), skip M5 processing for this day
         if fractal_level_asia_high is None and fractal_level_asia_low is None:
-            print(f"[PROCESS_BAR_DATA] No Asian fractals identified for {current_processing_date}. Skipping M5 processing for this day.")
+            print(f"[PROCESS_BAR_DATA] No Asian fractals identified for {current_processing_date} (Trend: {current_h1_trend}). Skipping M5 processing.")
             continue
 
-        # 2. Process M5 bars for the current_processing_date
+        # 3. Process M5 bars for the current_processing_date
         m5_bars_today = m5_dataframe[m5_dataframe.index.date == current_processing_date].sort_index()
 
         for m5_bar_time, m5_bar_data in m5_bars_today.iterrows():
@@ -463,14 +631,40 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
             # print(f"Processing M5 bar: {m5_bar_time} O:{m5_bar_data['open']} H:{m5_bar_data['high']} L:{m5_bar_data['low']} C:{m5_bar_data['close']}")
             
             # A. Check for Sweep (during Frankfurt & London)
-            if (fractal_level_asia_low or fractal_level_asia_high):
-                 check_sweep(m5_bar_data) # m5_bar_data is a Series, its name is the timestamp
+            # Only proceed if the relevant fractal (based on H1 trend) is set
+            can_check_sweep = False
+            if current_h1_trend == TrendContext.BULLISH and fractal_level_asia_low is not None:
+                can_check_sweep = True
+            elif current_h1_trend == TrendContext.BEARISH and fractal_level_asia_high is not None:
+                can_check_sweep = True
+            # If NEUTRAL trend was allowed, it would check based on any fractal found.
+            # However, we added a 'continue' if trend is NEUTRAL earlier.
+            
+            if can_check_sweep:
+                 check_sweep(m5_bar_data) # check_sweep internally checks its own session times
+            else:
+                # This case should ideally not be hit frequently if NEUTRAL trend days are skipped
+                # and if non-relevant fractals are None due to find_asia_fractals logic.
+                pass # No relevant fractal to check for sweep based on trend
 
             # B. Check for BOS (during London)
-            # BOS can only happen *after* a sweep has occurred and a bos_level is set.
-            if (sweep_terjadi_low or sweep_terjadi_high) and (bos_level_to_break_low or bos_level_to_break_high):
-                bos_confirmed, direction = check_bos(m5_bar_data, pip_size)
-                if bos_confirmed:
+            # BOS can only happen *after* a sweep has occurred AND the H1 trend aligns.
+            can_check_bos = False
+            direction_to_check = None
+            if current_h1_trend == TrendContext.BULLISH and sweep_terjadi_low and bos_level_to_break_low is not None:
+                can_check_bos = True
+                direction_to_check = TrendContext.BULLISH
+            elif current_h1_trend == TrendContext.BEARISH and sweep_terjadi_high and bos_level_to_break_high is not None:
+                can_check_bos = True
+                direction_to_check = TrendContext.BEARISH
+            
+            if can_check_bos:
+                # Pass the expected direction to check_bos, or let check_bos determine itself
+                # For now, check_bos determines direction internally but only one sweep flag (high or low) should be true.
+                bos_confirmed, trade_direction = check_bos(m5_bar_data, pip_size)
+                
+                # Ensure the confirmed BOS direction matches the H1 trend direction
+                if bos_confirmed and trade_direction == current_h1_trend:
                     # Check if a trade has already been made today (important after BOS confirmation)
                     if last_trade_execution_date == m5_bar_time.date():
                         print(f"[TRADE_LOGIC] BOS Confirmed at {m5_bar_time} but trade already made today ({last_trade_execution_date}). Skipping new trade.")
@@ -481,13 +675,13 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                         bos_level_to_break_low = None
                         continue # Move to next M5 bar
 
-                    print(f"[TRADE_LOGIC] BOS Confirmed: {direction} at {m5_bar_time}, Entry Price (Bar Close): {m5_bar_data['close']}")
+                    print(f"[TRADE_LOGIC] BOS Confirmed: {trade_direction} at {m5_bar_time}, Entry Price (Bar Close): {m5_bar_data['close']}")
                     
                     entry_price = m5_bar_data['close']
                     sl_price = None
                     sl_pips = 0
 
-                    if direction == "bullish":
+                    if trade_direction == TrendContext.BULLISH:
                         if sweep_bar_actual_low is None:
                             print(f"[ERROR_SL_CALC] Bullish BOS but sweep_bar_actual_low is None. Cannot set SL. Bar: {m5_bar_time}")
                             continue # Skip this trade signal
@@ -505,7 +699,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                         # Now calculate Take Profit using the new H1 fractal logic
                         if sl_price is not None and sl_pips > 0: # Ensure SL is valid before TP calc
                             take_profit_price, actual_rr = calculate_take_profit(
-                                direction, 
+                                trade_direction, 
                                 entry_price, 
                                 sl_price, 
                                 h1_dataframe, # Pass the full H1 dataframe
@@ -515,9 +709,9 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                             )
 
                             if take_profit_price is not None:
-                                print(f"[TRADE_SIM] {direction.capitalize()} Entry: {entry_price:.5f}, SL: {sl_price:.5f} ({sl_pips:.1f} pips), TP: {take_profit_price:.5f} (RR: {actual_rr:.2f})")
+                                print(f"[TRADE_SIM] {trade_direction.capitalize()} Entry: {entry_price:.5f}, SL: {sl_price:.5f} ({sl_pips:.1f} pips), TP: {take_profit_price:.5f} (RR: {actual_rr:.2f})")
                                 last_trade_execution_date = m5_bar_time.date()
-                                print(f"[TRADE_EXECUTION] Trade logged for {direction} at {m5_bar_time}. SL pips: {sl_pips:.1f}, TP RR: {actual_rr:.2f}. One trade per day rule active for {last_trade_execution_date}.")
+                                print(f"[TRADE_EXECUTION] Trade logged for {trade_direction} at {m5_bar_time}. SL pips: {sl_pips:.1f}, TP RR: {actual_rr:.2f}. One trade per day rule active for {last_trade_execution_date}.")
                                 
                                 # Reset sweeps and BOS levels after successful trade signal
                                 sweep_terjadi_high = False
@@ -526,7 +720,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                                 bos_level_to_break_low = None
                                 print(f"[STATE_RESET] Sweeps and BOS levels reset after trade signal at {m5_bar_time}.")
                             else:
-                                print(f"[TRADE_REJECT] BOS Confirmed for {direction} at {m5_bar_time}, but no suitable Take Profit found meeting RR criteria {MIN_RR}-{MAX_RR}. SL pips: {sl_pips:.1f}, Achieved RR: {actual_rr:.2f}. No trade.")
+                                print(f"[TRADE_REJECT] BOS Confirmed for {trade_direction} at {m5_bar_time}, but no suitable Take Profit found meeting RR criteria {MIN_RR}-{MAX_RR}. SL pips: {sl_pips:.1f}, Achieved RR: {actual_rr:.2f}. No trade.")
                                 # Do NOT set last_trade_execution_date here
                                 # Sweeps should still be reset to avoid repeated attempts on the same failed setup for the day
                                 sweep_terjadi_high = False
@@ -536,7 +730,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                                 print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
                             continue # Move to next M5 bar
                         else:
-                            print(f"[TRADE_REJECT] SL calculation failed or SL pips is zero for {direction} at {m5_bar_time}. Cannot calculate TP. No trade.")
+                            print(f"[TRADE_REJECT] SL calculation failed or SL pips is zero for {trade_direction} at {m5_bar_time}. Cannot calculate TP. No trade.")
                             # Sweeps should also be reset here
                             sweep_terjadi_high = False
                             sweep_terjadi_low = False
@@ -544,7 +738,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                             bos_level_to_break_low = None
                             print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
                             continue # Move to next M5 bar
-                    elif direction == "bearish":
+                    elif trade_direction == TrendContext.BEARISH:
                         if sweep_bar_actual_high is None:
                             print(f"[ERROR_SL_CALC] Bearish BOS but sweep_bar_actual_high is None. Cannot set SL. Bar: {m5_bar_time}")
                             # Reset states and continue
@@ -567,19 +761,19 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                         
                         if sl_price is not None and sl_pips > 0:
                             take_profit_price, actual_rr = calculate_take_profit(
-                                direction, entry_price, sl_price, h1_dataframe, pip_size, MIN_RR, MAX_RR
+                                trade_direction, entry_price, sl_price, h1_dataframe, pip_size, MIN_RR, MAX_RR
                             )
                             if take_profit_price is not None:
-                                print(f"[TRADE_SIM] {direction.capitalize()} Entry: {entry_price:.5f}, SL: {sl_price:.5f} ({sl_pips:.1f} pips), TP: {take_profit_price:.5f} (RR: {actual_rr:.2f})")
+                                print(f"[TRADE_SIM] {trade_direction.capitalize()} Entry: {entry_price:.5f}, SL: {sl_price:.5f} ({sl_pips:.1f} pips), TP: {take_profit_price:.5f} (RR: {actual_rr:.2f})")
                                 last_trade_execution_date = m5_bar_time.date()
-                                print(f"[TRADE_EXECUTION] Trade logged for {direction} at {m5_bar_time}. SL pips: {sl_pips:.1f}, TP RR: {actual_rr:.2f}. One trade per day rule active for {last_trade_execution_date}.")
+                                print(f"[TRADE_EXECUTION] Trade logged for {trade_direction} at {m5_bar_time}. SL pips: {sl_pips:.1f}, TP RR: {actual_rr:.2f}. One trade per day rule active for {last_trade_execution_date}.")
                                 sweep_terjadi_high = False
                                 sweep_terjadi_low = False
                                 bos_level_to_break_high = None
                                 bos_level_to_break_low = None
                                 print(f"[STATE_RESET] Sweeps and BOS levels reset after trade signal at {m5_bar_time}.")
                             else:
-                                print(f"[TRADE_REJECT] BOS Confirmed for {direction} at {m5_bar_time}, but no suitable Take Profit found meeting RR criteria {MIN_RR}-{MAX_RR}. SL pips: {sl_pips:.1f}, Achieved RR: {actual_rr:.2f}. No trade.")
+                                print(f"[TRADE_REJECT] BOS Confirmed for {trade_direction} at {m5_bar_time}, but no suitable Take Profit found meeting RR criteria {MIN_RR}-{MAX_RR}. SL pips: {sl_pips:.1f}, Achieved RR: {actual_rr:.2f}. No trade.")
                                 sweep_terjadi_high = False
                                 sweep_terjadi_low = False
                                 bos_level_to_break_high = None
@@ -587,7 +781,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                                 print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
                             continue # Move to next M5 bar
                         else:
-                            print(f"[TRADE_REJECT] SL calculation failed or SL pips is zero for {direction} at {m5_bar_time}. Cannot calculate TP. No trade.")
+                            print(f"[TRADE_REJECT] SL calculation failed or SL pips is zero for {trade_direction} at {m5_bar_time}. Cannot calculate TP. No trade.")
                             sweep_terjadi_high = False
                             sweep_terjadi_low = False
                             bos_level_to_break_high = None
@@ -595,7 +789,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                             print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
                             continue # Move to next M5 bar
                     else: # Should not happen if direction is only "bullish" or "bearish"
-                        print(f"[ERROR_DIRECTION] Unknown direction '{direction}' at {m5_bar_time}. States reset.")
+                        print(f"[ERROR_DIRECTION] Unknown direction '{trade_direction}' at {m5_bar_time}. States reset.")
                         sweep_terjadi_high = False
                         sweep_terjadi_low = False
                         bos_level_to_break_high = None
@@ -616,14 +810,6 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                     # This makes the common reset block below redundant and was the source of the error.
                     # So, I will remove the `global` declaration at line 505 and the subsequent resets,
                     # as they are now handled within the conditional blocks above.
-                    
-                    # REMOVING THE COMMON RESET BLOCK THAT WAS HERE:
-                    # global sweep_terjadi_high, sweep_terjadi_low, bos_level_to_break_high, bos_level_to_break_low # This was line 505
-                    # sweep_terjadi_high = False
-                    # sweep_terjadi_low = False
-                    # bos_level_to_break_high = None
-                    # bos_level_to_break_low = None
-                    # print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
                     
                     # After a BOS is confirmed and an attempt to trade is made (successful or not),
                     # we typically want to move to the next M5 bar as this specific setup is now processed.

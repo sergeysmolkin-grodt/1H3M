@@ -653,67 +653,80 @@ def find_asia_fractals(h1_bars: pd.DataFrame, trend_h1: str):
     
     print("".join(log_msg_parts))
 
-def check_sweep(m5_bar):
-    """Checks if the current M5 bar sweeps an Asian fractal."""
+def check_sweep(current_m5_bar, m5_history_for_bos_level: pd.DataFrame, K_bars_lookback_for_bos_level: int = 3):
+    """
+    Checks if the current M5 bar sweeps an Asian fractal.
+    If so, identifies the actual BOS level by looking at K bars *before* the sweep.
+    K_bars_lookback_for_bos_level: Number of M5 bars *before* the sweep bar to check for the initiating high/low.
+    """
     global sweep_terjadi_high, sweep_terjadi_low, sweep_bar_actual_high, sweep_bar_actual_low
     global fractal_level_asia_high, fractal_level_asia_low, bos_level_to_break_low, bos_level_to_break_high
 
-    bar_time = m5_bar.name # m5_bar is a Pandas Series, name is its datetime index
-    bar_high = m5_bar['high']
-    bar_low = m5_bar['low']
-    bar_close = m5_bar['close']
+    bar_time = current_m5_bar.name 
+    bar_high = current_m5_bar['high']
+    bar_low = current_m5_bar['low']
+
+    m5_bars_before_current = m5_history_for_bos_level[m5_history_for_bos_level.index < bar_time]
 
     if bar_time.hour == 6 and bar_time.minute < 20:
         print(f"    [SWEEP_TRACE] Entered check_sweep for M5 bar {bar_time}")
 
     is_active_session_for_sweep = is_in_frankfurt_session_for_sweep(bar_time) or is_in_active_trading_session_for_bos_or_entry(bar_time)
     if not is_active_session_for_sweep:
-        # print(f"  [SWEEP_TRACE] {bar_time}: Not in active session for sweep check.") # Verbose log if needed
         return
 
-    # Reset sweep states if entering Frankfurt session, before any checks
-    # This was originally done if Server.Time.Hour < 6 (UTC), meaning before Frankfurt
-    # Here, we do it on the first relevant bar of Frankfurt/London if not already done for the day.
-    # A more robust daily reset is handled by `reset_daily_states` called at start of day processing.
-    if bar_time.hour == FRANKFURT_SESSION_START_HOUR_UTC and bar_time.minute < 5: # First M5 bar of Frankfurt
+    if bar_time.hour == FRANKFURT_SESSION_START_HOUR_UTC and bar_time.minute < 5:
         if sweep_terjadi_high or sweep_terjadi_low:
             print(f"[SWEEP_RESET] Resetting sweep states at start of Frankfurt: {bar_time}")
-            sweep_terjadi_high = False
-            sweep_terjadi_low = False
-            sweep_bar_actual_high = None
-            sweep_bar_actual_low = None
-            bos_level_to_break_high = None
-            bos_level_to_break_low = None
+            sweep_terjadi_high, sweep_terjadi_low, sweep_bar_actual_high, sweep_bar_actual_low = False, False, None, None
+            bos_level_to_break_high, bos_level_to_break_low = None, None
 
     # Bullish Scenario: Sweep of Asian Low Fractal
     if fractal_level_asia_low is not None and not sweep_terjadi_low:
-        if bar_time.hour == 6 and bar_time.minute < 20:
-            print(f"    [SWEEP_TRACE] {bar_time}: Checking sweep for Asia Low {fractal_level_asia_low:.5f}. Bar Low: {bar_low:.5f}")
-        if bar_low <= fractal_level_asia_low: # Changed from < to <=
+        if bar_low <= fractal_level_asia_low: 
             sweep_terjadi_low = True
-            sweep_bar_actual_low = m5_bar # Store the whole bar
-            # Level to break for Bullish BOS is the CLOSE of the sweep bar
-            bos_level_to_break_low = sweep_bar_actual_low['close'] 
-            print(f"[SWEEP_DEBUG] Asian Low Fractal {fractal_level_asia_low} SWEPT by M5 bar {bar_time} (L: {bar_low}, C: {bar_close}). BOS Level (Sweep Close): {bos_level_to_break_low}")
-            # In a bullish sweep, we don't care about further high sweeps for now
-            sweep_terjadi_high = False 
-            sweep_bar_actual_high = None
-            bos_level_to_break_high = None
+            sweep_bar_actual_low = current_m5_bar 
+            
+            if not m5_bars_before_current.empty:
+                # Determine the actual number of bars to look back, capped by K_bars_lookback_for_bos_level and available history
+                actual_lookback = min(len(m5_bars_before_current), K_bars_lookback_for_bos_level)
+                if actual_lookback > 0:
+                    relevant_prior_bars = m5_bars_before_current.iloc[-actual_lookback:]
+                    initiating_high = relevant_prior_bars['high'].max()
+                    bos_level_to_break_low = round(initiating_high, 5 if get_pip_size(SYMBOL_TO_TRADE) == 0.0001 else 3)
+                    print(f"[SWEEP_DEBUG] Asian Low {fractal_level_asia_low:.5f} SWEPT by M5 {bar_time} (L: {bar_low:.5f}).")
+                    print(f"[SWEEP_DEBUG] BOS Level (High of last {actual_lookback} bar(s) prior to sweep): {bos_level_to_break_low:.5f} from bars ending {relevant_prior_bars.index[-1].strftime('%H:%M')}")
+                else:
+                    bos_level_to_break_low = None # Not enough prior bars
+                    print(f"[SWEEP_WARN] Asian Low {fractal_level_asia_low:.5f} SWEPT by M5 {bar_time}, but less than 1 prior M5 bar found to determine BOS level.")
+            else:
+                bos_level_to_break_low = None 
+                print(f"[SWEEP_WARN] Asian Low {fractal_level_asia_low:.5f} SWEPT by M5 {bar_time}, but NO prior M5 bars found to determine BOS level.")
+
+            sweep_terjadi_high, sweep_bar_actual_high, bos_level_to_break_high = False, None, None
 
     # Bearish Scenario: Sweep of Asian High Fractal
     if fractal_level_asia_high is not None and not sweep_terjadi_high:
-        if bar_time.hour == 6 and bar_time.minute < 20:
-            print(f"    [SWEEP_TRACE] {bar_time}: Checking sweep for Asia High {fractal_level_asia_high:.5f}. Bar High: {bar_high:.5f}")
-        if bar_high >= fractal_level_asia_high: # Changed from > to >=
+        if bar_high >= fractal_level_asia_high:
             sweep_terjadi_high = True
-            sweep_bar_actual_high = m5_bar # Store the whole bar
-            # Level to break for Bearish BOS is the CLOSE of the sweep bar
-            bos_level_to_break_high = sweep_bar_actual_high['close'] 
-            print(f"[SWEEP_DEBUG] Asian High Fractal {fractal_level_asia_high} SWEPT by M5 bar {bar_time} (H: {bar_high}, C: {bar_close}). BOS Level (Sweep Close): {bos_level_to_break_high}")
-            # In a bearish sweep, we don't care about further low sweeps for now
-            sweep_terjadi_low = False 
-            sweep_bar_actual_low = None
-            bos_level_to_break_low = None
+            sweep_bar_actual_high = current_m5_bar
+            
+            if not m5_bars_before_current.empty:
+                actual_lookback = min(len(m5_bars_before_current), K_bars_lookback_for_bos_level)
+                if actual_lookback > 0:
+                    relevant_prior_bars = m5_bars_before_current.iloc[-actual_lookback:]
+                    initiating_low = relevant_prior_bars['low'].min()
+                    bos_level_to_break_high = round(initiating_low, 5 if get_pip_size(SYMBOL_TO_TRADE) == 0.0001 else 3)
+                    print(f"[SWEEP_DEBUG] Asian High {fractal_level_asia_high:.5f} SWEPT by M5 {bar_time} (H: {bar_high:.5f}).")
+                    print(f"[SWEEP_DEBUG] BOS Level (Low of last {actual_lookback} bar(s) prior to sweep): {bos_level_to_break_high:.5f} from bars ending {relevant_prior_bars.index[-1].strftime('%H:%M')}")
+                else:
+                    bos_level_to_break_high = None
+                    print(f"[SWEEP_WARN] Asian High {fractal_level_asia_high:.5f} SWEPT by M5 {bar_time}, but less than 1 prior M5 bar found to determine BOS level.")
+            else:
+                bos_level_to_break_high = None
+                print(f"[SWEEP_WARN] Asian High {fractal_level_asia_high:.5f} SWEPT by M5 {bar_time}, but NO prior M5 bars found to determine BOS level.")
+
+            sweep_terjadi_low, sweep_bar_actual_low, bos_level_to_break_low = False, None, None
 
 def check_bos(m5_bar, pip_size=0.0001):
     """Checks if the current M5 bar confirms a Break of Structure (BOS)."""
@@ -732,13 +745,13 @@ def check_bos(m5_bar, pip_size=0.0001):
         # print(f"    [BOS_TRACE] {bar_time}: Not in active session for BOS check.") # Verbose log if needed
         return False, None # Not in session for BOS
 
-    # Bullish BOS: After Asian Low was swept, M5 bar closes above the CLOSE of the sweep bar.
+    # Bullish BOS: After Asian Low was swept, M5 bar closes above the identified pre-sweep high.
     if sweep_terjadi_low and bos_level_to_break_low is not None:
         if bar_time.hour == 6 and bar_time.minute < 20:
-            print(f"      [BOS_TRACE] {bar_time}: Checking Bullish BOS. Target: > {bos_level_to_break_low:.5f}, BarClose: {bar_close:.5f}")
+            print(f"      [BOS_TRACE] {bar_time}: Checking Bullish BOS. Target: > {bos_level_to_break_low:.5f} (PreSweepHigh), BarClose: {bar_close:.5f}")
         if bar_close > bos_level_to_break_low:
             distance_pips = (bar_close - bos_level_to_break_low) / pip_size
-            print(f"[BOS_DEBUG] Bullish BOS Check: M5 {bar_time} C: {bar_close:.5f} vs SweepBarClose: {bos_level_to_break_low:.5f}. Dist: {distance_pips:.1f} pips.")
+            print(f"[BOS_DEBUG] Bullish BOS Check: M5 {bar_time} C: {bar_close:.5f} vs PreSweepHigh: {bos_level_to_break_low:.5f}. Dist: {distance_pips:.1f} pips.")
             if distance_pips <= MAX_BOS_DISTANCE_PIPS:
                 print(f"[BOS_DEBUG] Bullish BOS CONFIRMED. Distance {distance_pips:.1f} pips <= MAX_BOS_DISTANCE_PIPS ({MAX_BOS_DISTANCE_PIPS}).")
                 sweep_terjadi_high = False 
@@ -751,13 +764,13 @@ def check_bos(m5_bar, pip_size=0.0001):
                 bos_level_to_break_low = None
                 return False, None # BOS too far
 
-    # Bearish BOS: After Asian High was swept, M5 bar closes below the CLOSE of the sweep bar.
+    # Bearish BOS: After Asian High was swept, M5 bar closes below the identified pre-sweep low.
     if sweep_terjadi_high and bos_level_to_break_high is not None:
         if bar_time.hour == 6 and bar_time.minute < 20:
-            print(f"      [BOS_TRACE] {bar_time}: Checking Bearish BOS. Target: < {bos_level_to_break_high:.5f}, BarClose: {bar_close:.5f}")
+            print(f"      [BOS_TRACE] {bar_time}: Checking Bearish BOS. Target: < {bos_level_to_break_high:.5f} (PreSweepLow), BarClose: {bar_close:.5f}")
         if bar_close < bos_level_to_break_high:
             distance_pips = (bos_level_to_break_high - bar_close) / pip_size
-            print(f"[BOS_DEBUG] Bearish BOS Check: M5 {bar_time} C: {bar_close:.5f} vs SweepBarClose: {bos_level_to_break_high:.5f}. Dist: {distance_pips:.1f} pips.")
+            print(f"[BOS_DEBUG] Bearish BOS Check: M5 {bar_time} C: {bar_close:.5f} vs PreSweepLow: {bos_level_to_break_high:.5f}. Dist: {distance_pips:.1f} pips.")
             if distance_pips <= MAX_BOS_DISTANCE_PIPS:
                 print(f"[BOS_DEBUG] Bearish BOS CONFIRMED. Distance {distance_pips:.1f} pips <= MAX_BOS_DISTANCE_PIPS ({MAX_BOS_DISTANCE_PIPS}).")
                 sweep_terjadi_low = False
@@ -860,94 +873,99 @@ def plot_trade_with_context(trade_info: dict,
     if not m5_df_trade.empty:
         print(f"[PLOT_DEBUG_M5] m5_df_trade.head():\n{m5_df_trade.head()}")
         print(f"[PLOT_DEBUG_M5] m5_df_trade.tail():\n{m5_df_trade.tail()}")
-        print(f"[PLOT_DEBUG_M5] m5_df_trade columns before rename: {m5_df_trade.columns.tolist()}")
-        # Ensure original columns exist before renaming, useful if m5_df_trade was manipulated unexpectedly
-        expected_cols = ['open', 'high', 'low', 'close']
-        if not all(col in m5_df_trade.columns for col in expected_cols):
-            print(f"[PLOT_WARN_M5] M5 data is missing some of OHLC columns: {m5_df_trade.columns.tolist()}")
-        # Rename is done in the loop above, this is a re-check of presence
-        # df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True) was called for m5_df_trade
-        print(f"[PLOT_DEBUG_M5] m5_df_trade columns after rename (expected): {m5_df_trade.columns.tolist()}") # Should show Open,High,Low,Close
+        # print(f"[PLOT_DEBUG_M5] m5_df_trade columns before rename: {m5_df_trade.columns.tolist()}") # This log was confusing, columns are already renamed by this point by the earlier loop
+        
+        # Check for required uppercase columns for mplfinance
         ohlc_present = all(col in m5_df_trade.columns for col in ['Open', 'High', 'Low', 'Close'])
-        print(f"[PLOT_DEBUG_M5] Required columns (Open, High, Low, Close) present? {ohlc_present}")
+        print(f"[PLOT_DEBUG_M5] Required columns (Open, High, Low, Close) for mplfinance present? {ohlc_present}")
 
-        ap_m5 = [] # Additional plots for M5
-        entry_line_m5 = [(entry_time, entry_price)]
-        exit_line_m5 = [(exit_time, exit_price)] if exit_time and exit_price else []
+        # Ensure correct data types before plotting (already done in previous step, but as a safeguard for this block)
+        m5_df_trade.index = pd.to_datetime(m5_df_trade.index)
+        for col in ['Open', 'High', 'Low', 'Close']:
+            if col in m5_df_trade.columns:
+                m5_df_trade[col] = pd.to_numeric(m5_df_trade[col], errors='coerce')
+        m5_df_trade.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True) # Drop rows if coerce created NaNs
 
-        ax_m5.axhline(sl_price, color='red', linestyle='-', linewidth=1, label=f'SL: {sl_price:.5f}')
-        ax_m5.axhline(tp_price, color='green', linestyle='-', linewidth=1, label=f'TP: {tp_price:.5f}')
-
-        entry_marker_style = '^' if trade_direction == TrendContext.BULLISH else 'v'
-        ax_m5.plot(entry_time, entry_price, marker=entry_marker_style, 
-                   color='blue', markersize=12, label=f'Entry @ {entry_price:.5f}')
-        
-        va_offset = 'bottom' if trade_direction == TrendContext.BULLISH else 'top'
-        ha_offset = 'left' 
-        ax_m5.text(entry_time, entry_price, f" {entry_price:.5f}", 
-                   color='blue', 
-                   verticalalignment=va_offset, 
-                   horizontalalignment=ha_offset, 
-                   fontsize=9,
-                   bbox=dict(boxstyle='round,pad=0.2', fc='yellow', alpha=0.6, ec='blue'))
-
-        if exit_time and exit_price:
-            ax_m5.plot(exit_time, exit_price, marker='o', color='black', markersize=10, label=f'Exit: {exit_price:.5f}')
-
-        if asia_level_data and asia_level_data.get('level') is not None:
-             ax_m5.axhline(asia_level_data['level'], color='purple', linestyle=':', linewidth=1.2, 
-                          label=f"Asia Lvl ({asia_level_data['level']:.5f})")
-
-        if sweep_bar_m5_data and sweep_bar_m5_data.get('time') is not None:
-            sweep_time = sweep_bar_m5_data['time']
-            sweep_marker_price = sweep_bar_m5_data['low'] if trade_direction == TrendContext.BULLISH else sweep_bar_m5_data['high']
-            ax_m5.plot(sweep_time, sweep_marker_price, marker='s', color='orange', markersize=7, 
-                       label=f"Sweep Bar @ {sweep_time.strftime('%H:%M')}")
-            if bos_level_data and bos_level_data.get('level') is not None:
-                 ax_m5.plot([sweep_time, bos_level_data.get('time', sweep_time)], 
-                            [sweep_bar_m5_data['close'], sweep_bar_m5_data['close']], 
-                            color='orange', linestyle='-.', linewidth=1.2, label=f"Sweep Close/BOS Lvl: {sweep_bar_m5_data['close']:.5f}")
-
-        if bos_level_data and bos_level_data.get('level') is not None and bos_level_data.get('time') == entry_time:
-            pass 
-        
         if len(m5_df_trade) < 2 or not ohlc_present:
             warning_message = f"M5 data insufficient for candles ({len(m5_df_trade)} row(s))"
             if not ohlc_present:
-                warning_message += " or OHLC columns missing."
+                warning_message += " or OHLC columns missing/incorrectly named for mplfinance."
             print(f"[PLOT_WARN_M5] {warning_message}")
             ax_m5.text(0.5, 0.5, warning_message, horizontalalignment='center', verticalalignment='center', transform=ax_m5.transAxes, wrap=True)
-            # Set title and grid even if candles are not plotted
             ax_m5.set_title('M5 Execution & Management (Candles Not Plotted)')
             ax_m5.grid(True, linestyle='--', alpha=0.7)
         else:
             try:
-                print(f"[PLOT_DEBUG_M5] Attempting to plot M5 candles. Data shape: {m5_df_trade.shape}")
-                
-                # Ensure correct data types before plotting
-                m5_df_trade.index = pd.to_datetime(m5_df_trade.index)
-                for col in ['Open', 'High', 'Low', 'Close']:
-                    if col in m5_df_trade.columns:
-                        m5_df_trade[col] = pd.to_numeric(m5_df_trade[col], errors='coerce')
-                # Drop rows with NaNs that might have been introduced by coerce
-                m5_df_trade.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
+                print(f"[PLOT_DEBUG_M5] Plotting M5 candles with m5_df_trade (shape: {m5_df_trade.shape}).")
 
-                if len(m5_df_trade) < 2:
-                    print(f"[PLOT_WARN_M5] M5 data insufficient for candles after type conversion ({len(m5_df_trade)} row(s)).")
-                    ax_m5.text(0.5, 0.5, f"M5 data insufficient after type conversion ({len(m5_df_trade)} row(s))", horizontalalignment='center', verticalalignment='center', transform=ax_m5.transAxes, wrap=True)
-                    ax_m5.set_title('M5 Execution & Management (Candles Not Plotted)')
-                    ax_m5.grid(True, linestyle='--', alpha=0.7)
-                else:
-                    print(f"[PLOT_DEBUG_M5] Plotting M5 candles with m5_df_trade (shape: {m5_df_trade.shape}) after type conversion.")
-                    mpf.plot(m5_df_trade, type='candle', ax=ax_m5, style='yahoo', 
-                             ylabel='Price (M5)', xrotation=0,
-                             # alines=dict(alines=entry_line_m5 + exit_line_m5, colors=['blue', 'black'], linewidths=0.7), # Temporarily removed
-                             addplot=ap_m5) # ap_m5 is empty
-                    ax_m5.set_title('M5 Execution & Management')
-                    ax_m5.grid(True, linestyle='--', alpha=0.7)
+                # --- START: Temporary M5 Isolated Plot Test ---
+                # try: 
+                #     filename_safe_time = entry_time.strftime("%Y%m%d_%H%M%S") 
+                #     isolated_fig_path = os.path.join("charts", f"{plot_filename_prefix}_{symbol.replace('/', '')}_{filename_safe_time}_M5_ISOLATED.png")
+                #     m5_df_trade_iso = m5_df_trade.copy()
+                #     for col_iso in ['Open', 'High', 'Low', 'Close']:
+                #         if col_iso in m5_df_trade_iso.columns:
+                #             m5_df_trade_iso[col_iso] = pd.to_numeric(m5_df_trade_iso[col_iso], errors='coerce')
+                #     m5_df_trade_iso.dropna(subset=['Open', 'High', 'Low', 'Close'], inplace=True)
+                #     
+                #     if not m5_df_trade_iso.empty and len(m5_df_trade_iso) >= 2:
+                #         mpf.plot(m5_df_trade_iso, type='candle', style='yahoo', 
+                #                  title=f"M5 Isolated Test - {symbol} - {filename_safe_time}", 
+                #                  savefig=isolated_fig_path, volume=False) 
+                #         print(f"[PLOT_DEBUG_M5_ISO] Isolated M5 plot saved to: {isolated_fig_path}")
+                #     else:
+                #         print(f"[PLOT_DEBUG_M5_ISO] Data for isolated M5 plot was empty or less than 2 rows after type conversion.")
+                # except Exception as e_iso:
+                #     print(f"[PLOT_ERROR_M5_ISO] Error saving isolated M5 plot: {e_iso}")
+                # --- END: Temporary M5 Isolated Plot Test ---
+
+                # Plot M5 candles FIRST (original logic for combined plot)
+                mpf.plot(m5_df_trade, type='candle', ax=ax_m5, style='yahoo', 
+                         ylabel='Price (M5)', xrotation=0)
+                         # addplot=ap_m5 was here, ap_m5 is empty, so removed for simplicity
+                
+                ax_m5.set_title('M5 Execution & Management') # Set title after main plot
+                ax_m5.grid(True, linestyle='--', alpha=0.7) # Set grid after main plot
+
+                # THEN, plot horizontal lines and markers
+                if sl_price: ax_m5.axhline(sl_price, color='red', linestyle='-', linewidth=1, label=f'SL: {sl_price:.5f}')
+                if tp_price: ax_m5.axhline(tp_price, color='green', linestyle='-', linewidth=1, label=f'TP: {tp_price:.5f}')
+
+                entry_marker_style = '^' if trade_direction == TrendContext.BULLISH else 'v'
+                if entry_price and entry_time: 
+                    ax_m5.plot(entry_time, entry_price, marker=entry_marker_style, 
+                               color='blue', markersize=12, label=f'Entry @ {entry_price:.5f}')
+                    va_offset = 'bottom' if trade_direction == TrendContext.BULLISH else 'top'
+                    ha_offset = 'left' 
+                    ax_m5.text(entry_time, entry_price, f" {entry_price:.5f}", 
+                               color='blue', 
+                               verticalalignment=va_offset, 
+                               horizontalalignment=ha_offset, 
+                               fontsize=9,
+                               bbox=dict(boxstyle='round,pad=0.2', fc='yellow', alpha=0.6, ec='blue'))
+
+                if exit_time and exit_price:
+                    ax_m5.plot(exit_time, exit_price, marker='o', color='black', markersize=10, label=f'Exit: {exit_price:.5f}')
+
+                if asia_level_data and asia_level_data.get('level') is not None:
+                     ax_m5.axhline(asia_level_data['level'], color='purple', linestyle=':', linewidth=1.2, 
+                                  label=f"Asia Lvl ({asia_level_data['level']:.5f})")
+
+                if sweep_bar_m5_data and sweep_bar_m5_data.get('time') is not None:
+                    sweep_time = sweep_bar_m5_data['time']
+                    sweep_marker_price = sweep_bar_m5_data['low'] if trade_direction == TrendContext.BULLISH else sweep_bar_m5_data['high']
+                    ax_m5.plot(sweep_time, sweep_marker_price, marker='s', color='orange', markersize=7, 
+                               label=f"Sweep Bar @ {sweep_time.strftime('%H:%M')}")
+                
+                if bos_level_data and bos_level_data.get('level') is not None and bos_level_data.get('type'):
+                    bos_line_label = f"BOS Lvl (Sweep H): {bos_level_data['level']:.5f}" if bos_level_data['type'] == 'sweep_high' else f"BOS Lvl (Sweep L): {bos_level_data['level']:.5f}"
+                    ax_m5.axhline(bos_level_data['level'], color='cyan', linestyle=':', linewidth=1.2, label=bos_line_label)
+                
+                ax_m5.legend(fontsize='small') # Legend after all plottable items are added
+
             except Exception as e_mpf_m5:
-                print(f"[PLOT_ERROR_M5] Error during M5 mplfinance.plot: {e_mpf_m5}")
-                error_text = f"Error plotting M5 candles: {str(e_mpf_m5)[:100]}" # Limit error message length
+                print(f"[PLOT_ERROR_M5] Error during M5 mplfinance.plot or subsequent M5 plotting: {e_mpf_m5}")
+                error_text = f"Error plotting M5: {str(e_mpf_m5)[:100]}" # Limit error message length
                 ax_m5.text(0.5, 0.5, error_text, horizontalalignment='center', verticalalignment='center', transform=ax_m5.transAxes, wrap=True, color='red')
                 ax_m5.set_title('M5 Execution & Management (Error)')
                 ax_m5.grid(True, linestyle='--', alpha=0.7)
@@ -986,6 +1004,8 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
     global sweep_bar_actual_high, sweep_bar_actual_low
     global bos_level_to_break_high, bos_level_to_break_low
     global executed_trades_list 
+
+    K_bars_lookback_for_bos_level = 3 # Define K here for process_bar_data scope
 
     executed_trades_list.clear() 
     current_account_balance = INITIAL_ACCOUNT_BALANCE 
@@ -1049,7 +1069,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                 can_check_sweep = True
             
             if can_check_sweep and (is_in_frankfurt_session_for_sweep(m5_bar_time) or is_in_active_trading_session_for_bos_or_entry(m5_bar_time)):
-                 check_sweep(m5_bar_data)
+                 check_sweep(m5_bar_data, m5_bars_today, K_bars_lookback_for_bos_level) # Pass K_bars_lookback
             
             can_check_bos = False
             if current_h1_trend == TrendContext.BULLISH and sweep_terjadi_low and bos_level_to_break_low is not None:
@@ -1098,7 +1118,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                                 plot_asia_level_data, plot_sweep_bar_data, plot_bos_level_data = None, None, None
                                 if fractal_level_asia_low is not None and asia_low_time is not None: plot_asia_level_data = {'level': fractal_level_asia_low, 'time': asia_low_time, 'type': 'low'}
                                 if sweep_bar_actual_low is not None: plot_sweep_bar_data = {'time': sweep_bar_actual_low.name, 'high': sweep_bar_actual_low['high'], 'low': sweep_bar_actual_low['low'], 'close': sweep_bar_actual_low['close']}
-                                if bos_level_to_break_low is not None: plot_bos_level_data = {'level': bos_level_to_break_low, 'time': m5_bar_time}
+                                if bos_level_to_break_low is not None: plot_bos_level_data = {'level': bos_level_to_break_low, 'time': m5_bar_time, 'type': 'sweep_high'}
                                 plot_trade_with_context(trade_result, h1_dataframe, m5_dataframe, symbol, "trade_bullish", plot_asia_level_data, plot_sweep_bar_data, plot_bos_level_data, pip_size)
                                 
                                 current_account_balance += trade_result.get('pnl_currency', 0)
@@ -1142,7 +1162,7 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                                 plot_asia_level_data, plot_sweep_bar_data, plot_bos_level_data = None, None, None
                                 if fractal_level_asia_high is not None and asia_high_time is not None: plot_asia_level_data = {'level': fractal_level_asia_high, 'time': asia_high_time, 'type': 'high'}
                                 if sweep_bar_actual_high is not None: plot_sweep_bar_data = {'time': sweep_bar_actual_high.name, 'high': sweep_bar_actual_high['high'], 'low': sweep_bar_actual_high['low'], 'close': sweep_bar_actual_high['close']}
-                                if bos_level_to_break_high is not None: plot_bos_level_data = {'level': bos_level_to_break_high, 'time': m5_bar_time}
+                                if bos_level_to_break_high is not None: plot_bos_level_data = {'level': bos_level_to_break_high, 'time': m5_bar_time, 'type': 'sweep_low'}
                                 plot_trade_with_context(trade_result, h1_dataframe, m5_dataframe, symbol, "trade_bearish", plot_asia_level_data, plot_sweep_bar_data, plot_bos_level_data, pip_size)
                                 
                                 current_account_balance += trade_result.get('pnl_currency', 0)

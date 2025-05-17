@@ -1,14 +1,16 @@
 import pandas as pd
 from datetime import time, datetime, timedelta
 import pytz # For timezone handling
+import time as sleep_timer # Import the standard time module and alias it to avoid conflict
 
 # --- Bot Configuration & Parameters ---
 SYMBOL_TO_TRADE = "EUR/USD" # Default, can be overridden in main
 STOP_LOSS_BUFFER_PIPS = 1.0 # Adjusted from C# 0.3 for M5, needs tuning. Was 5 for H1 SL rule. Let's use a small practical value.
 MIN_SL_PIPS = 5.0           # Minimum stop loss in pips
-# MIN_RR = 1.3                # Minimum Risk/Reward ratio - will add later with TP logic
-# MAX_RR = 5.0                # Maximum Risk/Reward ratio - will add later with TP logic
-# MAX_BOS_DISTANCE_PIPS = 15.0 # Maximum distance for BOS confirmation - will add later in check_bos
+MIN_RR = 1.3                # Minimum Risk/Reward ratio
+MAX_RR = 5.0                # Maximum Risk/Reward ratio
+MAX_BOS_DISTANCE_PIPS = 15.0 # Maximum distance for BOS confirmation in pips
+H1_FRACTAL_PERIOD = 2 # Period for H1 fractal identification (N bars on each side, e.g., 2 means center of 5 bars)
 
 PIP_SIZE_DEFAULT = 0.0001     # For EURUSD like pairs
 PIP_SIZE_JPY = 0.01         # For JPY pairs
@@ -22,7 +24,7 @@ asia_low_time = None
 fractal_level_asia_high = None
 fractal_level_asia_low = None
 
-sweep_ terjadi_high = False
+sweep_terjadi_high = False
 sweep_terjadi_low = False
 sweep_bar_actual_high = None # Store the actual bar object (Pandas Series)
 sweep_bar_actual_low = None  # Store the actual bar object (Pandas Series)
@@ -102,6 +104,161 @@ def reset_daily_states():
     bos_level_to_break_high = None
     bos_level_to_break_low = None
 
+# --- Fractal Helper Functions ---
+def _find_h1_fractals(h1_data: pd.DataFrame, fractal_lookback_period: int = H1_FRACTAL_PERIOD):
+    """
+    Identifies H1 fractals from the provided H1 data.
+    A fractal is a high/low point with 'fractal_lookback_period' lower/higher bars on each side.
+    Example: fractal_lookback_period = 2 means it's the highest/lowest of 5 bars.
+
+    Args:
+        h1_data (pd.DataFrame): DataFrame with H1 OHLC data, indexed by datetime.
+                                Must contain 'high' and 'low' columns.
+        fractal_lookback_period (int): Number of bars to check on each side of a potential fractal.
+
+    Returns:
+        tuple: (list_of_up_fractals, list_of_down_fractals)
+               Each list contains tuples of (price, datetime).
+    """
+    if h1_data is None or h1_data.empty or len(h1_data) < (2 * fractal_lookback_period + 1):
+        return [], []
+
+    up_fractals = []
+    down_fractals = []
+    
+    # Iterate from fractal_lookback_period to len(h1_data) - fractal_lookback_period -1
+    # to ensure there are enough bars on both sides for comparison.
+    for i in range(fractal_lookback_period, len(h1_data) - fractal_lookback_period):
+        is_up_fractal = True
+        is_down_fractal = True
+        
+        current_high = h1_data['high'].iloc[i]
+        current_low = h1_data['low'].iloc[i]
+        current_time = h1_data.index[i]
+
+        for j in range(1, fractal_lookback_period + 1):
+            # Check left side
+            if h1_data['high'].iloc[i-j] >= current_high:
+                is_up_fractal = False
+            if h1_data['low'].iloc[i-j] <= current_low:
+                is_down_fractal = False
+            
+            # Check right side
+            if h1_data['high'].iloc[i+j] >= current_high:
+                is_up_fractal = False
+            if h1_data['low'].iloc[i+j] <= current_low:
+                is_down_fractal = False
+        
+        if is_up_fractal:
+            up_fractals.append((current_high, current_time))
+        if is_down_fractal:
+            down_fractals.append((current_low, current_time))
+            
+    return up_fractals, down_fractals
+
+def find_nearest_h1_fractal_for_tp(trade_type: str, entry_price: float, h1_data: pd.DataFrame, pip_size: float):
+    """
+    Finds the nearest H1 fractal for Take Profit.
+    """
+    up_fractals, down_fractals = _find_h1_fractals(h1_data)
+    
+    nearest_level = None
+    min_distance_pips = float('inf')
+
+    if trade_type == "bullish": # TP for buy is an UP fractal
+        for level, time_val in up_fractals:
+            if level > entry_price:
+                distance_pips = (level - entry_price) / pip_size
+                if distance_pips < min_distance_pips:
+                    min_distance_pips = distance_pips
+                    nearest_level = level
+    elif trade_type == "bearish": # TP for sell is a DOWN fractal
+        for level, time_val in down_fractals:
+            if level < entry_price:
+                distance_pips = (entry_price - level) / pip_size
+                if distance_pips < min_distance_pips:
+                    min_distance_pips = distance_pips
+                    nearest_level = level
+    
+    # print(f"[TP_DEBUG_INTERNAL] Nearest H1 Fractal for {trade_type} from entry {entry_price}: {nearest_level}")
+    return nearest_level
+
+def try_find_next_h1_fractal(trade_type: str, entry_price: float, first_fractal_level: float, h1_data: pd.DataFrame, pip_size: float):
+    """
+    Finds the next H1 fractal after the first_fractal_level.
+    """
+    up_fractals, down_fractals = _find_h1_fractals(h1_data)
+    
+    next_level = None
+    min_distance_pips = float('inf')
+
+    if trade_type == "bullish": # Next UP fractal
+        for level, time_val in up_fractals:
+            if level > entry_price and level > first_fractal_level: # Must be further than the first TP
+                distance_pips = (level - entry_price) / pip_size
+                if distance_pips < min_distance_pips: # Still want the closest *of the next ones*
+                    min_distance_pips = distance_pips
+                    next_level = level
+    elif trade_type == "bearish": # Next DOWN fractal
+        for level, time_val in down_fractals:
+            if level < entry_price and level < first_fractal_level: # Must be further than the first TP
+                distance_pips = (entry_price - level) / pip_size
+                if distance_pips < min_distance_pips:
+                    min_distance_pips = distance_pips
+                    next_level = level
+    
+    # print(f"[TP_DEBUG_INTERNAL] Next H1 Fractal for {trade_type} (after {first_fractal_level}): {next_level}")
+    return next_level
+
+def calculate_take_profit(trade_type: str, entry_price: float, sl_price: float, 
+                          h1_data: pd.DataFrame, pip_size: float, 
+                          min_rr_val: float, max_rr_val: float):
+    """
+    Calculates Take Profit based on H1 fractals and Risk/Reward ratio.
+    Returns: (take_profit_price, rr_achieved) or (None, 0)
+    """
+    sl_pips = abs(entry_price - sl_price) / pip_size
+    if sl_pips == 0:
+        print("[TP_CALC_ERROR] Stop loss distance is 0 pips. Cannot calculate TP.")
+        return None, 0
+
+    print(f"[TP_CALC] SL pips: {sl_pips:.1f}. Required RR range: {min_rr_val}-{max_rr_val}")
+
+    first_tp_candidate = find_nearest_h1_fractal_for_tp(trade_type, entry_price, h1_data, pip_size)
+    print(f"[TP_CALC] Nearest H1 Fractal for TP: {first_tp_candidate}")
+
+    if first_tp_candidate is not None:
+        tp1_pips = abs(first_tp_candidate - entry_price) / pip_size
+        rr1 = tp1_pips / sl_pips if sl_pips > 0 else float('inf')
+        print(f"[TP_CALC] First TP candidate {first_tp_candidate} ({tp1_pips:.1f} pips), RR: {rr1:.2f}")
+
+        if min_rr_val <= rr1 <= max_rr_val:
+            print(f"[TP_CALC] First TP candidate is SUITABLE. Using: {first_tp_candidate}")
+            return round(first_tp_candidate, 5 if pip_size == 0.0001 else 3), rr1
+        elif rr1 < min_rr_val:
+            print(f"[TP_CALC] RR for First TP is TOO LOW. Searching for next H1 fractal.")
+            second_tp_candidate = try_find_next_h1_fractal(trade_type, entry_price, first_tp_candidate, h1_data, pip_size)
+            print(f"[TP_CALC] Next H1 Fractal for TP: {second_tp_candidate}")
+            if second_tp_candidate is not None:
+                tp2_pips = abs(second_tp_candidate - entry_price) / pip_size
+                rr2 = tp2_pips / sl_pips if sl_pips > 0 else float('inf')
+                print(f"[TP_CALC] Second TP candidate {second_tp_candidate} ({tp2_pips:.1f} pips), RR: {rr2:.2f}")
+                if min_rr_val <= rr2 <= max_rr_val:
+                    print(f"[TP_CALC] Second TP candidate is SUITABLE. Using: {second_tp_candidate}")
+                    return round(second_tp_candidate, 5 if pip_size == 0.0001 else 3), rr2
+                else:
+                    print(f"[TP_CALC] RR for Second TP is NOT SUITABLE ({rr2:.2f}). No valid TP found meeting RR criteria after checking next fractal.")
+                    return None, rr2 # Return actual RR for logging, even if not suitable
+            else:
+                print(f"[TP_CALC] No next H1 fractal found. First TP RR was {rr1:.2f}. No valid TP.")
+                return None, rr1 # Return actual RR for logging
+        else: # rr1 > max_rr_val
+            print(f"[TP_CALC] RR for First TP is TOO HIGH ({rr1:.2f}). No valid TP found meeting RR criteria (too far).")
+            return None, rr1 # Return actual RR for logging
+    else:
+        print(f"[TP_CALC] No H1 fractals found for TP. No valid TP.")
+        return None, 0
+    
 # --- Placeholder for Core Logic --- 
 def find_asia_fractals(h1_bars):
     """
@@ -197,6 +354,8 @@ def check_bos(m5_bar, pip_size=0.0001):
     """Checks if the current M5 bar confirms a Break of Structure (BOS)."""
     global sweep_terjadi_low, sweep_terjadi_high, bos_level_to_break_low, bos_level_to_break_high
     global sweep_bar_actual_low, sweep_bar_actual_high
+    # Access global fractal levels to potentially invalidate them if BOS is too far
+    global fractal_level_asia_low, fractal_level_asia_high
 
     bar_time = m5_bar.name
     bar_close = m5_bar['close']
@@ -208,24 +367,35 @@ def check_bos(m5_bar, pip_size=0.0001):
     if sweep_terjadi_low and bos_level_to_break_low is not None:
         if bar_close > bos_level_to_break_low:
             distance_pips = (bar_close - bos_level_to_break_low) / pip_size
-            # Original C# code had: Math.Abs(MarketSeries.Close.Last(1) - levelToBreak) >= _minBOSDistancePips * Symbol.PipSize;
-            # Here we just check if it's broken. Distance check for entry validity might be separate or incorporated.
-            # For now, let's assume any break is a BOS signal, distance can be logged.
-            print(f"[BOS_DEBUG] Bullish BOS! M5 {bar_time} C: {bar_close} broke above SweepBarClose: {bos_level_to_break_low}. Dist: {distance_pips:.1f} pips.")
-            # Invalidate further bearish checks for this sequence
-            sweep_terjadi_high = False 
-            bos_level_to_break_high = None
-            return True, "bullish"
+            print(f"[BOS_DEBUG] Bullish BOS Check: M5 {bar_time} C: {bar_close} vs SweepBarClose: {bos_level_to_break_low}. Dist: {distance_pips:.1f} pips.")
+            if distance_pips <= MAX_BOS_DISTANCE_PIPS:
+                print(f"[BOS_DEBUG] Bullish BOS CONFIRMED. Distance {distance_pips:.1f} pips <= MAX_BOS_DISTANCE_PIPS ({MAX_BOS_DISTANCE_PIPS}).")
+                sweep_terjadi_high = False 
+                bos_level_to_break_high = None
+                return True, "bullish"
+            else:
+                print(f"[BOS_REJECT] Bullish BOS attempt on bar {bar_time} REJECTED. Distance {distance_pips:.1f} pips > MAX_BOS_DISTANCE_PIPS ({MAX_BOS_DISTANCE_PIPS}). Asian Low Fractal {fractal_level_asia_low} invalidated for the day.")
+                fractal_level_asia_low = None # Invalidate this fractal for the rest of the day
+                sweep_terjadi_low = False # Reset sweep state as this path is now invalid
+                bos_level_to_break_low = None
+                return False, None # BOS too far
 
     # Bearish BOS: After Asian High was swept, M5 bar closes below the CLOSE of the sweep bar.
     if sweep_terjadi_high and bos_level_to_break_high is not None:
         if bar_close < bos_level_to_break_high:
             distance_pips = (bos_level_to_break_high - bar_close) / pip_size
-            print(f"[BOS_DEBUG] Bearish BOS! M5 {bar_time} C: {bar_close} broke below SweepBarClose: {bos_level_to_break_high}. Dist: {distance_pips:.1f} pips.")
-            # Invalidate further bullish checks for this sequence
-            sweep_terjadi_low = False
-            bos_level_to_break_low = None
-            return True, "bearish"
+            print(f"[BOS_DEBUG] Bearish BOS Check: M5 {bar_time} C: {bar_close} vs SweepBarClose: {bos_level_to_break_high}. Dist: {distance_pips:.1f} pips.")
+            if distance_pips <= MAX_BOS_DISTANCE_PIPS:
+                print(f"[BOS_DEBUG] Bearish BOS CONFIRMED. Distance {distance_pips:.1f} pips <= MAX_BOS_DISTANCE_PIPS ({MAX_BOS_DISTANCE_PIPS}).")
+                sweep_terjadi_low = False
+                bos_level_to_break_low = None
+                return True, "bearish"
+            else:
+                print(f"[BOS_REJECT] Bearish BOS attempt on bar {bar_time} REJECTED. Distance {distance_pips:.1f} pips > MAX_BOS_DISTANCE_PIPS ({MAX_BOS_DISTANCE_PIPS}). Asian High Fractal {fractal_level_asia_high} invalidated for the day.")
+                fractal_level_asia_high = None # Invalidate this fractal for the rest of the day
+                sweep_terjadi_high = False # Reset sweep state as this path is now invalid
+                bos_level_to_break_high = None
+                return False, None # BOS too far
             
     return False, None
 
@@ -238,6 +408,10 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
     global last_processed_h1_bar_time, last_processed_m5_bar_time
     global fractal_level_asia_high, fractal_level_asia_low
     global last_trade_execution_date # Ensure we can modify it
+    # Declare all globals that are modified in this function at the top
+    global sweep_terjadi_high, sweep_terjadi_low 
+    global sweep_bar_actual_high, sweep_bar_actual_low
+    global bos_level_to_break_high, bos_level_to_break_low
 
     # Combine and sort all bars by time to process chronologically
     # For simplicity, we'll iterate M5 bars and fetch relevant H1 state as needed.
@@ -328,20 +502,59 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                             sl_price = round(sl_price, 5 if pip_size == 0.0001 else 3)
                             sl_pips = (entry_price - sl_price) / pip_size
 
+                        # Now calculate Take Profit using the new H1 fractal logic
+                        if sl_price is not None and sl_pips > 0: # Ensure SL is valid before TP calc
+                            take_profit_price, actual_rr = calculate_take_profit(
+                                direction, 
+                                entry_price, 
+                                sl_price, 
+                                h1_dataframe, # Pass the full H1 dataframe
+                                pip_size,
+                                MIN_RR,
+                                MAX_RR
+                            )
 
-                        # TP logic was 1:1 or 1:2 based on SL distance from entry
-                        # TODO: Implement advanced TP logic from C#
-                        tp1_price = entry_price + (sl_pips * pip_size) # 1:1
-                        tp2_price = entry_price + (sl_pips * 2 * pip_size) # 1:2
-                        tp1_price = round(tp1_price, 5 if pip_size == 0.0001 else 3)
-                        tp2_price = round(tp2_price, 5 if pip_size == 0.0001 else 3)
-                        print(f"[TRADE_SIM] Bullish Entry: {entry_price:.5f}, SL: {sl_price:.5f} ({sl_pips:.1f} pips), TP1: {tp1_price:.5f}, TP2: {tp2_price:.5f}")
-                    
+                            if take_profit_price is not None:
+                                print(f"[TRADE_SIM] {direction.capitalize()} Entry: {entry_price:.5f}, SL: {sl_price:.5f} ({sl_pips:.1f} pips), TP: {take_profit_price:.5f} (RR: {actual_rr:.2f})")
+                                last_trade_execution_date = m5_bar_time.date()
+                                print(f"[TRADE_EXECUTION] Trade logged for {direction} at {m5_bar_time}. SL pips: {sl_pips:.1f}, TP RR: {actual_rr:.2f}. One trade per day rule active for {last_trade_execution_date}.")
+                                
+                                # Reset sweeps and BOS levels after successful trade signal
+                                sweep_terjadi_high = False
+                                sweep_terjadi_low = False
+                                bos_level_to_break_high = None
+                                bos_level_to_break_low = None
+                                print(f"[STATE_RESET] Sweeps and BOS levels reset after trade signal at {m5_bar_time}.")
+                            else:
+                                print(f"[TRADE_REJECT] BOS Confirmed for {direction} at {m5_bar_time}, but no suitable Take Profit found meeting RR criteria {MIN_RR}-{MAX_RR}. SL pips: {sl_pips:.1f}, Achieved RR: {actual_rr:.2f}. No trade.")
+                                # Do NOT set last_trade_execution_date here
+                                # Sweeps should still be reset to avoid repeated attempts on the same failed setup for the day
+                                sweep_terjadi_high = False
+                                sweep_terjadi_low = False
+                                bos_level_to_break_high = None
+                                bos_level_to_break_low = None
+                                print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
+                            continue # Move to next M5 bar
+                        else:
+                            print(f"[TRADE_REJECT] SL calculation failed or SL pips is zero for {direction} at {m5_bar_time}. Cannot calculate TP. No trade.")
+                            # Sweeps should also be reset here
+                            sweep_terjadi_high = False
+                            sweep_terjadi_low = False
+                            bos_level_to_break_high = None
+                            bos_level_to_break_low = None
+                            print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
+                            continue # Move to next M5 bar
                     elif direction == "bearish":
                         if sweep_bar_actual_high is None:
                             print(f"[ERROR_SL_CALC] Bearish BOS but sweep_bar_actual_high is None. Cannot set SL. Bar: {m5_bar_time}")
+                            # Reset states and continue
+                            sweep_terjadi_high = False
+                            sweep_terjadi_low = False
+                            bos_level_to_break_high = None
+                            bos_level_to_break_low = None
+                            print(f"[STATE_RESET] Critical error in SL calc, states reset. Bar: {m5_bar_time}")
                             continue # Skip this trade signal
-                        # SL above the high of the M5 sweep bar + buffer
+
                         sl_price = sweep_bar_actual_high['high'] + (STOP_LOSS_BUFFER_PIPS * pip_size)
                         sl_price = round(sl_price, 5 if pip_size == 0.0001 else 3)
                         sl_pips = (sl_price - entry_price) / pip_size
@@ -350,30 +563,71 @@ def process_bar_data(h1_dataframe, m5_dataframe, symbol):
                             print(f"[SL_ADJUST] Original Bearish SL pips {sl_pips:.1f} < Min SL pips {MIN_SL_PIPS}. Adjusting SL.")
                             sl_price = entry_price + (MIN_SL_PIPS * pip_size)
                             sl_price = round(sl_price, 5 if pip_size == 0.0001 else 3)
-                            sl_pips = (sl_price - entry_price) / pip_size
+                            sl_pips = (sl_price - entry_price) / pip_size # Recalculate pips
                         
-                        # TODO: Implement advanced TP logic from C#
-                        tp1_price = entry_price - (sl_pips * pip_size) # 1:1
-                        tp2_price = entry_price - (sl_pips * 2 * pip_size) # 1:2
-                        tp1_price = round(tp1_price, 5 if pip_size == 0.0001 else 3)
-                        tp2_price = round(tp2_price, 5 if pip_size == 0.0001 else 3)
-                        print(f"[TRADE_SIM] Bearish Entry: {entry_price:.5f}, SL: {sl_price:.5f} ({sl_pips:.1f} pips), TP1: {tp1_price:.5f}, TP2: {tp2_price:.5f}")
+                        if sl_price is not None and sl_pips > 0:
+                            take_profit_price, actual_rr = calculate_take_profit(
+                                direction, entry_price, sl_price, h1_dataframe, pip_size, MIN_RR, MAX_RR
+                            )
+                            if take_profit_price is not None:
+                                print(f"[TRADE_SIM] {direction.capitalize()} Entry: {entry_price:.5f}, SL: {sl_price:.5f} ({sl_pips:.1f} pips), TP: {take_profit_price:.5f} (RR: {actual_rr:.2f})")
+                                last_trade_execution_date = m5_bar_time.date()
+                                print(f"[TRADE_EXECUTION] Trade logged for {direction} at {m5_bar_time}. SL pips: {sl_pips:.1f}, TP RR: {actual_rr:.2f}. One trade per day rule active for {last_trade_execution_date}.")
+                                sweep_terjadi_high = False
+                                sweep_terjadi_low = False
+                                bos_level_to_break_high = None
+                                bos_level_to_break_low = None
+                                print(f"[STATE_RESET] Sweeps and BOS levels reset after trade signal at {m5_bar_time}.")
+                            else:
+                                print(f"[TRADE_REJECT] BOS Confirmed for {direction} at {m5_bar_time}, but no suitable Take Profit found meeting RR criteria {MIN_RR}-{MAX_RR}. SL pips: {sl_pips:.1f}, Achieved RR: {actual_rr:.2f}. No trade.")
+                                sweep_terjadi_high = False
+                                sweep_terjadi_low = False
+                                bos_level_to_break_high = None
+                                bos_level_to_break_low = None
+                                print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
+                            continue # Move to next M5 bar
+                        else:
+                            print(f"[TRADE_REJECT] SL calculation failed or SL pips is zero for {direction} at {m5_bar_time}. Cannot calculate TP. No trade.")
+                            sweep_terjadi_high = False
+                            sweep_terjadi_low = False
+                            bos_level_to_break_high = None
+                            bos_level_to_break_low = None
+                            print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
+                            continue # Move to next M5 bar
+                    else: # Should not happen if direction is only "bullish" or "bearish"
+                        print(f"[ERROR_DIRECTION] Unknown direction '{direction}' at {m5_bar_time}. States reset.")
+                        sweep_terjadi_high = False
+                        sweep_terjadi_low = False
+                        bos_level_to_break_high = None
+                        bos_level_to_break_low = None
+                        # No continue here, will fall through to the end of m5_bar loop
                     
-                    if sl_price is not None: # If SL was successfully calculated
-                        last_trade_execution_date = m5_bar_time.date() # Mark that a trade was made today
-                        print(f"[TRADE_EXECUTION] Trade logged for {direction} at {m5_bar_time}. SL pips: {sl_pips:.1f}. One trade per day rule active for {last_trade_execution_date}.")
+                    # The common reset logic previously at line 505 and onwards is now handled
+                    # within each specific branch (trade success, trade reject due to TP/RR, trade reject due to SL error).
+                    # This ensures that states are reset appropriately for each case and avoids the SyntaxError.
+                    # We also added 'continue' in some branches to ensure that after a trade decision (or failure to make one),
+                    # we move to the next M5 bar, as the setup has been "consumed".
+                    # However, looking back, the continue was removed and reset happens inside the block.
+                    # The very last common reset block is no longer needed if all paths handle it.
+                    # Let's ensure all paths that lead to a "consumed signal" reset state and then we can remove the final common one.
 
-
-                    # Reset sweeps to prevent re-entry on the same signal immediately
-                    # A more sophisticated trade management would be needed for multiple positions or re-entries
-                    global sweep_terjadi_high, sweep_terjadi_low, bos_level_to_break_high, bos_level_to_break_low
-                    sweep_terjadi_high = False
-                    sweep_terjadi_low = False
-                    bos_level_to_break_high = None
-                    bos_level_to_break_low = None
-                    print(f"[STATE_RESET] Sweeps and BOS levels reset after trade signal at {m5_bar_time}.")
-                    # Potentially break from inner loop for the day if only one trade per day is desired
-                    # break # Uncomment if one trade per day
+                    # The previous logic had a common reset at the end.
+                    # I've moved the reset into each condition (TP success, TP fail, SL fail).
+                    # This makes the common reset block below redundant and was the source of the error.
+                    # So, I will remove the `global` declaration at line 505 and the subsequent resets,
+                    # as they are now handled within the conditional blocks above.
+                    
+                    # REMOVING THE COMMON RESET BLOCK THAT WAS HERE:
+                    # global sweep_terjadi_high, sweep_terjadi_low, bos_level_to_break_high, bos_level_to_break_low # This was line 505
+                    # sweep_terjadi_high = False
+                    # sweep_terjadi_low = False
+                    # bos_level_to_break_high = None
+                    # bos_level_to_break_low = None
+                    # print(f"[STATE_RESET] Sweeps and BOS levels reset after trade attempt (or signal) at {m5_bar_time}.")
+                    
+                    # After a BOS is confirmed and an attempt to trade is made (successful or not),
+                    # we typically want to move to the next M5 bar as this specific setup is now processed.
+                    continue # Process next M5 bar
 
     print("\n--- Backtesting processing complete ---")
 
@@ -402,7 +656,7 @@ if __name__ == '__main__':
             backtest_start_date, backtest_end_date, 
             config.TWELVE_DATA_API_KEY
         )
-        time.sleep(1) # Respect API rate limits if on a free plan
+        sleep_timer.sleep(1) # Respect API rate limits if on a free plan
 
         print("\nFetching M5 data...")
         m5_data = data_fetcher.get_historical_data(
@@ -410,6 +664,7 @@ if __name__ == '__main__':
             backtest_start_date, backtest_end_date, 
             config.TWELVE_DATA_API_KEY
         )
+        # No need for sleep after the last API call in this sequence
 
         if h1_data is not None and not h1_data.empty and m5_data is not None and not m5_data.empty:
             print("\nData fetched successfully. Starting strategy processing...")

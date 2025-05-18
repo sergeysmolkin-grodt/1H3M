@@ -65,7 +65,7 @@ namespace cAlgo.Robots
 
         private StreamWriter _chartDataWriter;
         private string _csvFilePath;
-        private static readonly string CSV_HEADER = "Timestamp,EventType,H1_Open,H1_High,H1_Low,H1_Close,Price1,Price2,TradeType,Notes";
+        private static readonly string CSV_HEADER = "Timestamp;EventType;H1_Open;H1_High;H1_Low;H1_Close;Price1;Price2;TradeType;Notes";
 
         protected override void OnStart()
         {
@@ -755,11 +755,9 @@ namespace cAlgo.Robots
             // --- Логирование H1 бара (корректное местоположение) ---
             if (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime != _lastH1BarTime)
             {
-                // Эта проверка гарантирует, что мы на H1 (из проверки выше) и что это новый H1 бар
                 var h1Bar = _h1Bars.Last(0);
                 LogChartEvent(h1Bar.OpenTime, "H1_BAR", h1Open: h1Bar.Open, h1High: h1Bar.High, h1Low: h1Bar.Low, h1Close: h1Bar.Close);
-                // _lastH1BarTime будет обновлен в FindAsianSessionFractals или принудительно позже,
-                // но здесь важно залогировать H1 бар при его фактическом формировании для OnTick.
+                _lastH1BarTime = h1Bar.OpenTime;
             }
             // --- Конец логирования H1 бара ---
 
@@ -790,25 +788,12 @@ namespace cAlgo.Robots
             }
             
             bool shouldFindFractals = _asianFractals.Count == 0 || (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime > _lastH1BarTime);
-            if (shouldFindFractals && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date)
+            bool newH1BarJustLogged = (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime == _lastH1BarTime);
+
+            if (_asianFractals.Count == 0 || (newH1BarJustLogged && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date))
             {
                 DebugLog($"[DEBUG] Поиск фракталов в азиатскую сессию для тренда: {trendContext}...");
                 FindAsianSessionFractals(trendContext);
-                if (_h1Bars.Count > 0)
-                {
-                    _lastH1BarTime = _h1Bars.Last(0).OpenTime;
-                }
-            }
-            else if (_asianFractals.Count > 0 && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date)
-            {
-                DebugLog($"[DEBUG] Наступил новый день ({Server.Time.Date}), а фракталы от {_asianFractals.FirstOrDefault()?.Time.Date}. Очистка и поиск новых.");
-                _asianFractals.Clear();
-                _lastH1BarTime = DateTime.MinValue;
-                FindAsianSessionFractals(trendContext);
-                if (_h1Bars.Count > 0)
-                {
-                    _lastH1BarTime = _h1Bars.Last(0).OpenTime;
-                }
             }
             
             DebugLog($"[DEBUG] Проверка свипа фракталов для тренда: {trendContext}...");
@@ -888,6 +873,7 @@ namespace cAlgo.Robots
             var h1Bars = _h1Bars;
             var hourlyFractals = Indicators.Fractals(h1Bars, FractalPeriod);
             var today = Server.Time.Date;
+            //DebugLog($"[DEBUG] FindAsianSessionFractals: Поиск для тренда {trendContext} с FractalPeriod = {FractalPeriod}");
 
             for (int i = FractalPeriod; i < h1Bars.Count - FractalPeriod; i++)
             {
@@ -895,6 +881,7 @@ namespace cAlgo.Robots
                 if (!(barTime.Date == today && barTime.Hour >= AsiaStartHour && barTime.Hour < AsiaEndHour))
                     continue;
                 
+                // Для бычьего тренда ищем нижние фракталы для лонгов
                 if (trendContext == TrendContext.Bullish)
                 {
                     if (!double.IsNaN(hourlyFractals.DownFractal[i]))
@@ -906,9 +893,11 @@ namespace cAlgo.Robots
                             IsSwept = false
                         });
                         DebugLog($"[DEBUG] Найден бычий (нижний) фрактал: {hourlyFractals.DownFractal[i]:F5} в {barTime}");
+                        // ИСПРАВЛЕНИЕ ЗДЕСЬ: убраны h1Open и т.д., так как они не нужны для этого события
                         LogChartEvent(barTime, "ASIAN_FRACTAL", price1: hourlyFractals.DownFractal[i], tradeType: "Bullish", notes: "Lower fractal");
                     }
                 }
+                // Для медвежьего тренда ищем верхние фракталы для шортов
                 else if (trendContext == TrendContext.Bearish)
                 {
                     if (!double.IsNaN(hourlyFractals.UpFractal[i]))
@@ -920,11 +909,13 @@ namespace cAlgo.Robots
                             IsSwept = false
                         });
                         DebugLog($"[DEBUG] Найден медвежий (верхний) фрактал: {hourlyFractals.UpFractal[i]:F5} в {barTime}");
+                        // ИСПРАВЛЕНИЕ ЗДЕСЬ: убраны h1Open и т.д.
                         LogChartEvent(barTime, "ASIAN_FRACTAL", price1: hourlyFractals.UpFractal[i], tradeType: "Bearish", notes: "Upper fractal");
                     }
                 }
             }
             
+            // Сортируем фракталы
             var currentPrice = Bars.ClosePrices.Last(0);
             if (trendContext == TrendContext.Bullish)
             {
@@ -935,7 +926,7 @@ namespace cAlgo.Robots
                 _asianFractals = _asianFractals.OrderByDescending(f => f.Level).ToList();
             }
 
-            if (today == new DateTime(2025, 5, 14))
+            if (today == new DateTime(2025, 5, 14)) // Логируем только для целевой даты
             {
                 foreach (var f in _asianFractals)
                 {
@@ -1164,9 +1155,12 @@ namespace cAlgo.Robots
                 string price1Str = price1?.ToString(CultureInfo.InvariantCulture) ?? "";
                 string price2Str = price2?.ToString(CultureInfo.InvariantCulture) ?? "";
 
-                string sanitizedNotes = notes?.Replace(",", ";")?.Replace("\"", "'") ?? "";
+                // Очистка notes от запятых и кавычек во избежание проблем с CSV
+                // Заменяем также точку с запятой в notes, так как она теперь наш основной разделитель
+                string sanitizedNotes = notes?.Replace(";", ":")?.Replace(",", ".")?.Replace("\"", "'") ?? "";
 
-                _chartDataWriter.WriteLine($"{timestamp:yyyy-MM-ddTHH:mm:ss},{eventType},{h1OpenStr},{h1HighStr},{h1LowStr},{h1CloseStr},{price1Str},{price2Str},{tradeType},{sanitizedNotes}");
+                // Изменяем разделитель на точку с запятой
+                _chartDataWriter.WriteLine($"{timestamp:yyyy-MM-ddTHH:mm:ss};{eventType};{h1OpenStr};{h1HighStr};{h1LowStr};{h1CloseStr};{price1Str};{price2Str};{tradeType};{sanitizedNotes}");
             }
             catch (Exception ex)
             {

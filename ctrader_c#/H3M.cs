@@ -32,20 +32,16 @@ namespace cAlgo.Robots
         [Parameter("Risk Percent", DefaultValue = 1.0)]
         public double RiskPercent { get; set; }
 
-        [Parameter("Stop Loss Buffer Pips", DefaultValue = 5)]
-        public double StopLossBufferPips { get; set; }
-
-        [Parameter("Min RR", DefaultValue = 1.3)]
-        public double MinRR { get; set; }
-
-        [Parameter("Max RR", DefaultValue = 5.0)]
-        public double MaxRR { get; set; }
-
-        [Parameter("Max BOS Distance Pips", DefaultValue = 15.0)]
-        public double MaxBOSDistancePips { get; set; }
-
         [Parameter("Manual Trend Mode", DefaultValue = ManualTrendMode.Auto)]
         public ManualTrendMode TrendMode { get; set; }
+
+        [Parameter("Broker Min Stop Level Pips", DefaultValue = 2.0, MinValue = 0.0)]
+        public double BrokerMinStopLevelPips { get; set; }
+
+        private const double _minRR = 1.3;
+        private const double _maxRR = 5.0;
+        private const int H1_TP_FRACTAL_PERIOD = 10; // New constant for H1 TP fractals
+        private const double ASIAN_FRACTAL_SL_FIXED_BUFFER_PIPS = 1.5; // Fixed buffer for Asian fractal SL
 
         private Fractals _fractals;
         private List<AsianFractal> _asianFractals = new List<AsianFractal>();
@@ -58,14 +54,18 @@ namespace cAlgo.Robots
         private static readonly int AsiaStartHour = 0;
         private static readonly int AsiaEndHour = 9;
         private DateTime _lastTradeDate = DateTime.MinValue;
-        // private bool _loggedSpecificBarData = false; // Флаг, чтобы залогировать данные только один раз - Warning CS0414, комментируем
         private bool _loggedSpecificBarDataThisInstance = false;
         private DateTime _debugSpecificTimestamp = DateTime.MinValue;
         private HashSet<DateTime> _loggedOHLCBarsForTargetDate = new HashSet<DateTime>();
 
+        // New fields for daily setup
+        private TrendContext _dailyTrendContext = TrendContext.Neutral;
+        private DateTime _lastDailySetupDate = DateTime.MinValue;
+        private bool _asianFractalsFoundForToday = false; // New flag
+
         private StreamWriter _chartDataWriter;
         private string _csvFilePath;
-        private static readonly string CSV_HEADER = "Timestamp;EventType;H1_Open;H1_High;H1_Low;H1_Close;Price1;Price2;TradeType;Notes";
+        private static readonly string CSV_HEADER = "Timestamp;EventType;H1_Open;H1_High;H1_Low;H1_Close;Price1;Price2;Price3;TradeType;Notes";
 
         protected override void OnStart()
         {
@@ -195,29 +195,32 @@ namespace cAlgo.Robots
             double? nearestLevel = null;
             double minDistance = double.MaxValue;
             var h1Bars = _h1Bars;
-            // Create hourly fractals
-            var hourlyFractals = Indicators.Fractals(h1Bars, FractalPeriod);
+            var hourlyFractals = Indicators.Fractals(h1Bars, H1_TP_FRACTAL_PERIOD);
             
-            for (int i = 2; i < h1Bars.Count - 2; i++)
+            for (int i = H1_TP_FRACTAL_PERIOD; i < h1Bars.Count - H1_TP_FRACTAL_PERIOD; i++)
             {
                 if (tradeType == TradeType.Buy && !double.IsNaN(hourlyFractals.UpFractal[i]))
                 {
                     var level = hourlyFractals.UpFractal[i];
+                    DebugLog($"[TP_FIND_NEAREST_RAW_UP] i={i}, Raw H1 UpFractal: {level:F5} at {h1Bars.OpenTimes[i]}, Entry: {entryPrice:F5}"); 
                     var distance = level - entryPrice;
                     if (distance > 0 && distance < minDistance)
                     {
                         minDistance = distance;
                         nearestLevel = level;
+                        DebugLog($"[TP_FIND_NEAREST_CANDIDATE_UP] Found NEW nearest H1 UpFractal: {nearestLevel:F5} at {h1Bars.OpenTimes[i]}");
                     }
                 }
                 if (tradeType == TradeType.Sell && !double.IsNaN(hourlyFractals.DownFractal[i]))
                 {
                     var level = hourlyFractals.DownFractal[i];
+                    DebugLog($"[TP_FIND_NEAREST_RAW_DOWN] i={i}, Raw H1 DownFractal: {level:F5} at {h1Bars.OpenTimes[i]}, Entry: {entryPrice:F5}");
                     var distance = entryPrice - level;
                     if (distance > 0 && distance < minDistance)
                     {
                         minDistance = distance;
                         nearestLevel = level;
+                        DebugLog($"[TP_FIND_NEAREST_CANDIDATE_DOWN] Found NEW nearest H1 DownFractal: {nearestLevel:F5} at {h1Bars.OpenTimes[i]}");
                     }
                 }
             }
@@ -230,30 +233,32 @@ namespace cAlgo.Robots
             double? nextLevel = null;
             double minDistance = double.MaxValue;
             var h1Bars = _h1Bars;
-            var hourlyFractals = Indicators.Fractals(h1Bars, FractalPeriod);
+            var hourlyFractals = Indicators.Fractals(h1Bars, H1_TP_FRACTAL_PERIOD);
             
-            for (int i = 2; i < h1Bars.Count - 2; i++)
+            for (int i = H1_TP_FRACTAL_PERIOD; i < h1Bars.Count - H1_TP_FRACTAL_PERIOD; i++)
             {
                 if (tradeType == TradeType.Buy && !double.IsNaN(hourlyFractals.UpFractal[i]))
                 {
                     var level = hourlyFractals.UpFractal[i];
+                    DebugLog($"[TP_FIND_NEXT_RAW_UP] i={i}, Raw H1 UpFractal: {level:F5} at {h1Bars.OpenTimes[i]}, Entry: {entryPrice:F5}, FirstTP: {firstFractalLevel:F5}");
                     var distance = level - entryPrice;
-                    // For buy, find next fractal higher than the first one
-                    if (distance > 0 && level > firstFractalLevel && distance < minDistance)
+                    if (distance > 0 && level > firstFractalLevel && distance < minDistance) 
                     {
                         minDistance = distance;
                         nextLevel = level;
+                        DebugLog($"[TP_FIND_NEXT_CANDIDATE_UP] Found NEW next H1 UpFractal: {nextLevel:F5} at {h1Bars.OpenTimes[i]}");
                     }
                 }
                 if (tradeType == TradeType.Sell && !double.IsNaN(hourlyFractals.DownFractal[i]))
                 {
                     var level = hourlyFractals.DownFractal[i];
+                    DebugLog($"[TP_FIND_NEXT_RAW_DOWN] i={i}, Raw H1 DownFractal: {level:F5} at {h1Bars.OpenTimes[i]}, Entry: {entryPrice:F5}, FirstTP: {firstFractalLevel:F5}");
                     var distance = entryPrice - level;
-                    // For sell, find next fractal lower than the first one
-                    if (distance > 0 && level < firstFractalLevel && distance < minDistance)
+                    if (distance > 0 && level < firstFractalLevel && distance < minDistance) 
                     {
                         minDistance = distance;
                         nextLevel = level;
+                        DebugLog($"[TP_FIND_NEXT_CANDIDATE_DOWN] Found NEW next H1 DownFractal: {nextLevel:F5} at {h1Bars.OpenTimes[i]}");
                     }
                 }
             }
@@ -271,142 +276,160 @@ namespace cAlgo.Robots
             }
             DebugLog($"[TP_DEBUG] Stop Loss Distance (Pips): {stopLossDistance/Symbol.PipSize:F1}");
 
-            // 1. Ищем ближайший H1 фрактал для TP
-            double? firstTpCandidate = FindNearestH1FractalForTP(tradeType, entryPrice);
-            DebugLog($"[TP_DEBUG] Nearest H1 Fractal for TP: {firstTpCandidate?.ToString("F5") ?? "N/A"}");
+            double? candidateTp = FindNearestH1FractalForTP(tradeType, entryPrice);
+            int attempts = 0;
+            const int maxAttempts = 10; // Prevent infinite loops, look for at most 10 fractals
+            double lastConsideredRr = 0;
 
-            if (firstTpCandidate.HasValue)
+            while (candidateTp.HasValue && attempts < maxAttempts)
             {
-                double rr1 = Math.Abs(firstTpCandidate.Value - entryPrice) / stopLossDistance;
-                DebugLog($"[TP_DEBUG] RR for First TP Candidate ({firstTpCandidate.Value:F5}): {rr1:F2}");
+                attempts++;
+                DebugLog($"[TP_DEBUG] Attempt {attempts}: Evaluating TP Candidate ({candidateTp.Value:F5})");
+                double currentRr = Math.Abs(candidateTp.Value - entryPrice) / stopLossDistance;
+                lastConsideredRr = currentRr; // Store for final reject log
+                DebugLog($"[TP_DEBUG] RR for Candidate ({candidateTp.Value:F5}): {currentRr:F2}");
 
-                if (rr1 >= MinRR && rr1 <= MaxRR)
+                if (currentRr >= _minRR && currentRr <= _maxRR)
                 {
-                    DebugLog($"[TP_DEBUG] First TP ({firstTpCandidate.Value:F5}) is SUITABLE. Using it.");
-                    return (firstTpCandidate.Value, rr1);
+                    DebugLog($"[TP_DEBUG] SUITABLE TP found: {candidateTp.Value:F5} with RR {currentRr:F2}. Using it.");
+                    return (candidateTp.Value, currentRr);
                 }
-                else if (rr1 < MinRR)
-                {
-                    DebugLog($"[TP_DEBUG] RR for First TP ({firstTpCandidate.Value:F5}) is TOO LOW ({rr1:F2} < {MinRR:F2}). Searching for next H1 fractal.");
-                    double? secondTpCandidate = TryFindNextH1Fractal(tradeType, entryPrice, firstTpCandidate.Value);
-                    DebugLog($"[TP_DEBUG] Next H1 Fractal for TP: {secondTpCandidate?.ToString("F5") ?? "N/A"}");
-                    if (secondTpCandidate.HasValue)
-                    {
-                        double rr2 = Math.Abs(secondTpCandidate.Value - entryPrice) / stopLossDistance;
-                        DebugLog($"[TP_DEBUG] RR for Second TP Candidate ({secondTpCandidate.Value:F5}): {rr2:F2}");
-
-                        if (rr2 >= MinRR && rr2 <= MaxRR)
-                        {
-                            DebugLog($"[TP_DEBUG] Second TP ({secondTpCandidate.Value:F5}) is SUITABLE. Using it.");
-                            return (secondTpCandidate.Value, rr2);
-                        }
-                        else
-                        {
-                            DebugLog($"[TP_DEBUG] RR for Second TP ({secondTpCandidate.Value:F5}) is NOT SUITABLE ({rr2:F2}). Valid RR Range: {MinRR:F2}-{MaxRR:F2}. Entry might be cancelled.");
-                            return (null, rr2); 
-                        }
-                    }
-                    else
-                    {
-                        DebugLog($"[TP_DEBUG] No next H1 fractal found. First TP ({firstTpCandidate.Value:F5}) had RR={rr1:F2}. Entry might be cancelled.");
-                        return (null, rr1); 
-                    }
-                }
-                else // rr1 > MaxRR
-                {
-                    DebugLog($"[TP_DEBUG] RR for First TP ({firstTpCandidate.Value:F5}) is TOO HIGH ({rr1:F2} > {MaxRR:F2}). Entry might be cancelled.");
-                    return (null, rr1);
-                }
+                
+                DebugLog($"[TP_DEBUG] TP Candidate {candidateTp.Value:F5} (RR {currentRr:F2}) is NOT SUITABLE (Range: {_minRR:F2}-{_maxRR:F2}). Searching for next.");
+                candidateTp = TryFindNextH1Fractal(tradeType, entryPrice, candidateTp.Value); 
             }
-            else
+
+            if (attempts == maxAttempts && candidateTp.HasValue) 
             {
-                DebugLog($"[TP_DEBUG] No H1 fractals found for TP. Entry might be cancelled based on other TP logic (if any) or lack of TP.");
-                return (null, 0);
+                DebugLog($"[TP_DEBUG] Max attempts ({maxAttempts}) reached trying to find suitable TP. Last candidate {candidateTp.Value:F5} (RR {lastConsideredRr:F2}) was not suitable.");
+            } else if (!candidateTp.HasValue && attempts > 0) 
+            {
+                 DebugLog($"[TP_DEBUG] No more H1 fractals found to check after {attempts} attempts. Last RR considered: {lastConsideredRr:F2}.");
+            } else if (attempts == 0 && !candidateTp.HasValue) {
+                 DebugLog($"[TP_DEBUG] No H1 fractals found at all by FindNearestH1FractalForTP.");
             }
+            
+            DebugLog($"[TP_DEBUG] No suitable H1 fractal TP found that meets RR criteria.");
+            return (null, lastConsideredRr); // Return last RR for more informative reject log in EnterPosition
         }
 
         private double CalculateStopLoss(TradeType tradeType, double asianFractalLevelToPlaceSLBehind)
         {
+            double stopLossPrice;
             if (tradeType == TradeType.Buy)
             {
-                // For buy orders, place stop loss below the swept fractal with smaller buffer
-                return asianFractalLevelToPlaceSLBehind - (0.3 * Symbol.PipSize); // Уменьшаем буфер до 0.3 пипса
+                stopLossPrice = asianFractalLevelToPlaceSLBehind - ASIAN_FRACTAL_SL_FIXED_BUFFER_PIPS * Symbol.PipSize;
+                DebugLog($"[DEBUG_CALC_SL] Buy. AsianFractal Level: {asianFractalLevelToPlaceSLBehind.ToString(CultureInfo.InvariantCulture)}. Buffer: {ASIAN_FRACTAL_SL_FIXED_BUFFER_PIPS.ToString(CultureInfo.InvariantCulture)} pips. Final SL: {stopLossPrice.ToString(CultureInfo.InvariantCulture)}");
             }
-            else
+            else // Sell
             {
-                // For sell orders, place stop loss above the swept fractal
-                return asianFractalLevelToPlaceSLBehind + (0.3 * Symbol.PipSize); // Уменьшаем буфер до 0.3 пипса
+                stopLossPrice = asianFractalLevelToPlaceSLBehind + ASIAN_FRACTAL_SL_FIXED_BUFFER_PIPS * Symbol.PipSize;
+                DebugLog($"[DEBUG_CALC_SL] Sell. AsianFractal Level: {asianFractalLevelToPlaceSLBehind.ToString(CultureInfo.InvariantCulture)}. Buffer: {ASIAN_FRACTAL_SL_FIXED_BUFFER_PIPS.ToString(CultureInfo.InvariantCulture)} pips. Final SL: {stopLossPrice.ToString(CultureInfo.InvariantCulture)}");
             }
+            return stopLossPrice;
         }
 
         private void EnterPosition(TradeType tradeType, double entryPrice, AsianFractal fractal)
         {
-            if (_lastTradeDate.Date == Server.Time.Date && Positions.Count > 0)
+            DebugLog($"[DEBUG_ENTER_POS] Entered. TradeType: {tradeType}, EntryPrice: {entryPrice.ToString(CultureInfo.InvariantCulture)}, Fractal Level: {fractal.Level.ToString(CultureInfo.InvariantCulture)}");
+
+            double slPriceCalculated = CalculateStopLoss(tradeType, fractal.Level);
+            double slPriceNormalized = NormalizePriceManually(slPriceCalculated); // Using manual normalization
+            DebugLog($"[DEBUG_ENTER_POS] SL Calculated: {slPriceCalculated.ToString(CultureInfo.InvariantCulture)}, SL Normalized (Manual): {slPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
+
+            (double? takeProfitPriceCalculated, double rr) tpResult = CalculateTakeProfit(tradeType, entryPrice, slPriceNormalized);
+            DebugLog($"[DEBUG_ENTER_POS] TP Calculated: {tpResult.takeProfitPriceCalculated?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString(CultureInfo.InvariantCulture)}");
+
+            if (!tpResult.takeProfitPriceCalculated.HasValue || tpResult.rr < _minRR || tpResult.rr > _maxRR)
             {
-                DebugLog("Trading limit: One trade per symbol per day. Position already exists or trade executed today.");
+                DebugLog($"[DEBUG_ENTER_POS] TP/RR criteria not met. TP: {tpResult.takeProfitPriceCalculated?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString(CultureInfo.InvariantCulture)}. MinRR: {_minRR}, MaxRR: {_maxRR}");
+                LogChartEvent(Server.Time, "TP_RR_REJECT", price1: entryPrice, price2: slPriceNormalized, price3: tpResult.takeProfitPriceCalculated, tradeType: tradeType.ToString(), notes: $"Calculated RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}");
+                fractal.EntryDone = true; 
                 return;
             }
 
-            if (fractal == null || fractal.SweepExtreme == null || fractal.BosLevel == null)
-            {
-                DebugLog("[ERROR_ENTRY] Fractal or its SweepExtreme/BosLevel is null. Cannot calculate SL.");
-                return;
-            }
-            
-            double slPrice;
-            string slCalculationBasis;
+            double tpPriceNormalized = NormalizePriceManually(tpResult.takeProfitPriceCalculated.Value); // Using manual normalization
+            DebugLog($"[DEBUG_ENTER_POS] TP Normalized (Manual): {tpPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
+
+            // Adjust SL and TP based on BrokerMinStopLevelPips parameter
+            double stopLevelPips = BrokerMinStopLevelPips;
+            double minStopDistance = stopLevelPips * Symbol.PipSize;
+            DebugLog($"[DEBUG_ENTER_POS] Broker Min Stop Level: {stopLevelPips} pips, MinStopDistance: {minStopDistance.ToString(CultureInfo.InvariantCulture)}");
 
             if (tradeType == TradeType.Buy)
             {
-                // SL is below the low of the sweep bar
-                slPrice = Math.Round(fractal.SweepExtreme.Value - StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
-                slCalculationBasis = $"SweepExtreme.Low ({fractal.SweepExtreme.Value}) - Buffer ({StopLossBufferPips} pips)";
+                if (entryPrice - slPriceNormalized < minStopDistance)
+                {
+                    slPriceNormalized = NormalizePriceManually(entryPrice - minStopDistance);
+                    DebugLog($"[DEBUG_ENTER_POS] SL for BUY adjusted due to StopLevel. New SL: {slPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
+                }
+                if (tpPriceNormalized - entryPrice < minStopDistance)
+                {
+                    tpPriceNormalized = NormalizePriceManually(entryPrice + minStopDistance);
+                    DebugLog($"[DEBUG_ENTER_POS] TP for BUY adjusted due to StopLevel. New TP: {tpPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
+                }
             }
             else // Sell
             {
-                // SL is above the high of the sweep bar
-                slPrice = Math.Round(fractal.SweepExtreme.Value + StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
-                slCalculationBasis = $"SweepExtreme.High ({fractal.SweepExtreme.Value}) + Buffer ({StopLossBufferPips} pips)";
+                if (slPriceNormalized - entryPrice < minStopDistance)
+                {
+                    slPriceNormalized = NormalizePriceManually(entryPrice + minStopDistance);
+                    DebugLog($"[DEBUG_ENTER_POS] SL for SELL adjusted due to StopLevel. New SL: {slPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
+                }
+                if (entryPrice - tpPriceNormalized < minStopDistance)
+                {
+                    tpPriceNormalized = NormalizePriceManually(entryPrice - minStopDistance);
+                    DebugLog($"[DEBUG_ENTER_POS] TP for SELL adjusted due to StopLevel. New TP: {tpPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
+                }
             }
             
-            var stopLossPips = Math.Abs(entryPrice - slPrice) / Symbol.PipSize;
-            if (stopLossPips < Symbol.PipSize * 1) // Minimum 1 pip SL
-            {
-                DebugLog($"[SL_ADJUST] Calculated SL ({stopLossPips} pips) is too small. Adjusting SL.");
-                if (tradeType == TradeType.Buy)
-                    slPrice = Math.Round(entryPrice - Symbol.PipSize * 5, Symbol.Digits); // Min 5 pips SL
-                else
-                    slPrice = Math.Round(entryPrice + Symbol.PipSize * 5, Symbol.Digits);
-                stopLossPips = Math.Abs(entryPrice - slPrice) / Symbol.PipSize;
-            }
+            // Recalculate RR with potentially adjusted SL/TP
+            // Important: This might change the RR and it could fall out of the desired _minRR/_maxRR range.
+            // For now, we will proceed with adjusted SL/TP even if RR changes. A more advanced logic could re-evaluate or reject the trade here.
+            double adjustedStopLossPips = Math.Abs(entryPrice - slPriceNormalized) / Symbol.PipSize;
+            double adjustedTakeProfitPips = Math.Abs(tpPriceNormalized - entryPrice) / Symbol.PipSize;
+            double newRR = (adjustedStopLossPips > 0) ? adjustedTakeProfitPips / adjustedStopLossPips : 0;
+            DebugLog($"[DEBUG_ENTER_POS] SL/TP potentially adjusted. New SL pips: {adjustedStopLossPips}, New TP pips: {adjustedTakeProfitPips}, New RR: {newRR.ToString(CultureInfo.InvariantCulture)}");
 
-            var tpResult = CalculateTakeProfit(tradeType, entryPrice, slPrice);
-            if (tpResult.takeProfitPrice == null || tpResult.rr < MinRR)
+            double positionSize = CalculatePositionSize(adjustedStopLossPips);
+            DebugLog($"[DEBUG_ENTER_POS] Position Size Calculated: {positionSize.ToString(CultureInfo.InvariantCulture)} for SL pips: {adjustedStopLossPips.ToString(CultureInfo.InvariantCulture)}");
+
+            if (positionSize <= 0)
             {
-                DebugLog($"[TP_REJECT] TP calculation failed or RR too low ({tpResult.rr}). MinRR: {MinRR}. Entry: {entryPrice}, SL: {slPrice}");
+                DebugLog($"[DEBUG_ENTER_POS] Invalid position size: {positionSize}. SL pips: {adjustedStopLossPips}");
+                LogChartEvent(Server.Time, "POS_SIZE_ERROR", price1: entryPrice, price2: slPriceNormalized, tradeType: tradeType.ToString(), notes: $"Calculated Position Size: {positionSize}");
+                fractal.EntryDone = true; 
                 return;
             }
 
-            var positionSize = CalculatePositionSize(stopLossPips);
-            if (positionSize < Symbol.VolumeInUnitsMin)
-            {
-                DebugLog($"[VOL_REJECT] Calculated position size {positionSize} is less than min volume {Symbol.VolumeInUnitsMin}. SL pips: {stopLossPips}");
-                return;
-            }
-
-            var label = $"H3M_{tradeType}_{Server.Time.ToShortTimeString()}";
-            var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, label, slPrice, tpResult.takeProfitPrice);
+            string label = $"H3M_{tradeType}_{Server.Time:HHmm}";
+            var result = ExecuteMarketOrder(tradeType, Symbol.Name, positionSize, label, slPriceNormalized, tpPriceNormalized, comment: "H3M Trade");
 
             if (result.IsSuccessful)
             {
                 fractal.EntryDone = true;
                 _lastTradeDate = Server.Time.Date;
-                DebugLog($"[TRADE_OPEN] {tradeType} order successful. Price: {result.Position.EntryPrice}, SL: {slPrice} (Basis: {slCalculationBasis}), TP: {tpResult.takeProfitPrice} (RR: {tpResult.rr}). Size: {positionSize}");
-                LogChartEvent(result.Position.EntryTime, "TRADE_ENTRY", price1: result.Position.EntryPrice, price2: slPrice, tradeType: tradeType.ToString(), notes: $"TP: {tpResult.takeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}, Label: {label}");
+                DebugLog($"[TRADE_OPEN] {tradeType} order successful. Entry: {result.Position.EntryPrice}, Actual SL: {result.Position.StopLoss}, Actual TP: {result.Position.TakeProfit}. \n" +
+                         $"Attempted SL: {slPriceNormalized.ToString(CultureInfo.InvariantCulture)} (Raw: {slPriceCalculated.ToString(CultureInfo.InvariantCulture)}), \n" +
+                         $"Attempted TP: {tpPriceNormalized.ToString(CultureInfo.InvariantCulture)} (Raw: {tpResult.takeProfitPriceCalculated?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}), \n" +
+                         $"Intended RR: {tpResult.rr.ToString(CultureInfo.InvariantCulture)}. Size: {positionSize.ToString(CultureInfo.InvariantCulture)}");
+                
+                LogChartEvent(result.Position.EntryTime, "TRADE_ENTRY", 
+                              price1: result.Position.EntryPrice, 
+                              price2: result.Position.StopLoss, 
+                              price3: result.Position.TakeProfit, 
+                              tradeType: tradeType.ToString(), 
+                              notes: $"Intended RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}; Initial SL Calc: {slPriceNormalized.ToString(CultureInfo.InvariantCulture)}; Initial TP Calc: {tpPriceNormalized.ToString(CultureInfo.InvariantCulture)}; Label: {label}");
             }
             else
             {
-                DebugLog($"[TRADE_FAIL] {tradeType} order failed: {result.Error}");
+                DebugLog($"[DEBUG_ENTER_POS] Failed to open position. Error: {result.Error}");
+                LogChartEvent(Server.Time, "TRADE_FAILED", 
+                              price1: entryPrice, 
+                              price2: slPriceNormalized, 
+                              price3: tpPriceNormalized, 
+                              tradeType: tradeType.ToString(), 
+                              notes: $"Error: {result.Error?.ToString() ?? "Unknown"}. SL Raw: {slPriceCalculated.ToString(CultureInfo.InvariantCulture)}, TP Raw: {tpResult.takeProfitPriceCalculated?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}");
             }
         }
 
@@ -744,69 +767,123 @@ namespace cAlgo.Robots
 
         protected override void OnTick()
         {
-            _loggedSpecificBarDataThisInstance = false;
+            _loggedSpecificBarDataThisInstance = false; // Reset per tick
 
-            if (Bars.TimeFrame != TimeFrame.Hour) 
+            // --- Daily Setup: Trend and Asian Fractals ---
+            if (Server.Time.Date != _lastDailySetupDate)
             {
-                DebugLog($"[DEBUG] Неверный таймфрейм для OnTick: {Bars.TimeFrame}");
-                return;
+                _lastDailySetupDate = Server.Time.Date;
+                _asianFractals.Clear(); 
+                _asianFractalsFoundForToday = false; // Reset flag for the new day
+
+                DebugLog($"[DAILY_SETUP] Performing daily setup for {Server.Time.Date:yyyy-MM-dd}");
+
+                if (!IsStrongTrend(out _dailyTrendContext))
+                {
+                    DebugLog($"[DAILY_SETUP] No strong trend identified for {Server.Time.Date:yyyy-MM-dd}. Bot will be inactive today. Trend found: {_dailyTrendContext}");
+                }
+                else
+                {
+                    DebugLog($"[DAILY_SETUP] Strong trend for {Server.Time.Date:yyyy-MM-dd} is: {_dailyTrendContext}.");
+                    // We no longer call FindAsianSessionFractals here immediately.
+                }
             }
 
-            // --- Логирование H1 бара (корректное местоположение) ---
+            // If no trend established for the day, or it's neutral, do nothing further.
+            if (_dailyTrendContext == TrendContext.Neutral)
+            {
+                // Minimal logging to avoid spam, or just return. 
+                // For 14.05, if it becomes Neutral, this log is important.
+                if (Server.Time.Date == new DateTime(2025,5,14) && Server.Time.Minute % 15 == 0 && Server.Time.Second < 5) // Log periodically on target date
+                {
+                     DebugLog($"[DEBUG_ONTICK] Daily trend is Neutral for {Server.Time.Date:yyyy-MM-dd}. No trading actions.");
+                }
+                return; 
+            }
+            
+            // Original H1 bar logging for chart plotter can remain if needed outside daily setup,
+            // but ensure it doesn't interfere with the new daily logic.
             if (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime != _lastH1BarTime)
             {
                 var h1Bar = _h1Bars.Last(0);
                 LogChartEvent(h1Bar.OpenTime, "H1_BAR", h1Open: h1Bar.Open, h1High: h1Bar.High, h1Low: h1Bar.Low, h1Close: h1Bar.Close);
-                _lastH1BarTime = h1Bar.OpenTime;
+                _lastH1BarTime = h1Bar.OpenTime; 
+
+                // --- Attempt to find Asian Fractals on new H1 bar if conditions met ---
+                if (_dailyTrendContext != TrendContext.Neutral && 
+                    !_asianFractalsFoundForToday && 
+                    Server.Time.Date == _lastDailySetupDate && // Ensure it's for the current day's setup
+                    Server.Time.Hour >= AsiaStartHour && Server.Time.Hour < AsiaEndHour)
+                {
+                    DebugLog($"[DEBUG_ONTICK] New H1 bar ({h1Bar.OpenTime:HH:mm}). Attempting to find Asian fractals for {_dailyTrendContext} trend.");
+                    FindAsianSessionFractals(_dailyTrendContext);
+                    if (_asianFractals.Count > 0)
+                    {
+                        DebugLog($"[DEBUG_ONTICK] Asian fractals found and loaded: {_asianFractals.Count}");
+                        _asianFractalsFoundForToday = true; // Mark as found
+                    }
+                    else
+                    {
+                        DebugLog($"[DEBUG_ONTICK] No Asian fractals found on this attempt ({h1Bar.OpenTime:HH:mm}). Will retry on next H1 bar within Asian session.");
+                        // _asianFractalsFoundForToday remains false, so we will try again on next H1 bar in Asian session.
+                    }
+                }
             }
-            // --- Конец логирования H1 бара ---
 
-            TrendContext trendContext;
-            var currentPrice = Symbol.Bid; // Для лонгов используем Bid, для шортов Ask
-
-            if (Server.Time.Date != _lastAsianSessionCheck) // Проверяем один раз в день в начале дня
+            // Check if a trade has already been executed today
+            if (Positions.Any(p => p.SymbolName == SymbolName && p.EntryTime.Date == Server.Time.Date) || _lastTradeDate.Date == Server.Time.Date) 
             {
-                CheckAsianSession(); // Определяем, находимся ли мы в Азиатской сессии
-                _lastAsianSessionCheck = Server.Time.Date;
-            }
-
-            if (!IsStrongTrend(out trendContext))
-            {
-                DebugLog($"[DEBUG] Нет очевидного тренда, день пропускается");
+                 if (Server.Time.Date == new DateTime(2025,5,14) && Server.Time.Minute % 15 == 0 && Server.Time.Second < 5) // Log periodically on target date
+                 {
+                    DebugLog($"[DEBUG_ONTICK] Trade already executed or position exists for {SymbolName} on {Server.Time.Date:yyyy-MM-dd}. No new entries.");
+                 }
                 return;
             }
-            DebugLog($"[DEBUG] ======= НОВЫЙ ТИК ======= {Server.Time} =======");
-            DebugLog($"[DEBUG] Текущий тренд: {trendContext}, цена = {currentPrice:F5}, время = {Server.Time}");
             
+            // The rest of the OnTick logic will use _dailyTrendContext
+            // DebugLog($"[DEBUG] ======= НОВЫЙ ТИК ======= {Server.Time} ======="); // This can be noisy
+            // DebugLog($"[DEBUG] Текущий тренд (daily): {_dailyTrendContext}, цена = {Symbol.Bid:F5}, время = {Server.Time}");
+            // DebugLog($"[DEBUG] Настройки: MinRR={_minRR:F2}, MaxRR={_maxRR:F2}");
 
-            DebugLog($"[DEBUG] Настройки: MinRR={MinRR:F2}, MaxRR={MaxRR:F2}");
+            // --- Removed old logic for CheckAsianSession and shouldFindFractals ---
+            // CheckAsianSession(); // No longer needed here, handled by daily setup
+            // bool shouldFindFractals = _asianFractals.Count == 0 || (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime > _lastH1BarTime);
+            // bool newH1BarJustLogged = (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime == _lastH1BarTime);
+            // if (_asianFractals.Count == 0 || (newH1BarJustLogged && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date))
+            // {
+            //    DebugLog($"[DEBUG] Поиск фракталов в азиатскую сессию для тренда: {_dailyTrendContext}...");
+            //    FindAsianSessionFractals(_dailyTrendContext); // Already called in daily setup
+            // }
             
-            if (_lastTradeDate.Date == Server.Time.Date)
+            // DebugLog($"[DEBUG_ONTICK] Processing tick for {_dailyTrendContext} trend. Asian fractals found: {_asianFractals.Count}");
+            // Conditional logging based on whether fractals are found or not
+            if (_asianFractalsFoundForToday)
             {
-                DebugLog($"[DEBUG] Уже была сделка сегодня, день пропускается");
-                return;
+                 DebugLog($"[DEBUG_ONTICK] Processing tick. Daily Trend: {_dailyTrendContext}. Asian fractals loaded ({_asianFractals.Count}). Sweeps will be checked.");
             }
-            
-            bool shouldFindFractals = _asianFractals.Count == 0 || (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime > _lastH1BarTime);
-            bool newH1BarJustLogged = (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime == _lastH1BarTime);
+            else if (_dailyTrendContext != TrendContext.Neutral && Server.Time.Hour >= AsiaStartHour && Server.Time.Hour < AsiaEndHour)
+            {
+                 DebugLog($"[DEBUG_ONTICK] Processing tick. Daily Trend: {_dailyTrendContext}. Waiting for Asian fractals to be identified (current time: {Server.Time:HH:mm}).");
+            }
+            // No specific log if outside Asian session and fractals not found yet, to avoid spam.
 
-            if (_asianFractals.Count == 0 || (newH1BarJustLogged && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date))
+            if (!_asianFractalsFoundForToday && _dailyTrendContext != TrendContext.Neutral) 
             {
-                DebugLog($"[DEBUG] Поиск фракталов в азиатскую сессию для тренда: {trendContext}...");
-                FindAsianSessionFractals(trendContext);
+                // If fractals are not yet found for today (and trend is active), don't proceed to sweep/BOS logic.
+                // This also implicitly handles the case where we are outside Asian session hours before fractals were found.
+                return; 
             }
-            
-            DebugLog($"[DEBUG] Проверка свипа фракталов для тренда: {trendContext}...");
-            CheckFractalsSweep(trendContext);
+
+            CheckFractalsSweep(_dailyTrendContext);
             
             foreach (var fractal in _asianFractals.Where(f => f.IsSwept && !f.EntryDone && f.BosLevel.HasValue).ToList())
             {
                 TradeType entryTradeType;
-                if (trendContext == TrendContext.Bullish)
+                if (TrendContext.Bullish == _dailyTrendContext)
                 {
                     entryTradeType = TradeType.Buy;
                 }
-                else if (trendContext == TrendContext.Bearish)
+                else if (TrendContext.Bearish == _dailyTrendContext)
                 {
                     entryTradeType = TradeType.Sell;
                 }
@@ -815,7 +892,7 @@ namespace cAlgo.Robots
                     continue; 
                 }
 
-                var bosResult = Is3mStructureBreak(fractal, trendContext);
+                var bosResult = Is3mStructureBreak(fractal, _dailyTrendContext);
                 if (bosResult.IsBreak)
                 {
                     // Логирование BOS
@@ -842,7 +919,9 @@ namespace cAlgo.Robots
                                       notes: $"Fractal Level: {fractal.Level.ToString(CultureInfo.InvariantCulture)}. M3 Bar data unavailable.");
                     }
                     
+                    DebugLog($"[DEBUG_ONTICK_PRE_ENTER_POS] Attempting to call EnterPosition for fractal at {fractal.Time} with BOS Price {bosResult.EntryPrice}");
                     EnterPosition(entryTradeType, bosResult.EntryPrice, fractal);
+                    DebugLog($"[DEBUG_ONTICK_POST_ENTER_POS] Returned from EnterPosition for fractal at {fractal.Time}");
                 }
             }
             
@@ -869,48 +948,62 @@ namespace cAlgo.Robots
 
         private void FindAsianSessionFractals(TrendContext trendContext)
         {
+            DebugLog($"[DEBUG] Entered FindAsianSessionFractals for trend: {trendContext} on {Server.Time:yyyy-MM-dd HH:mm:ss}");
             _asianFractals.Clear();
             var h1Bars = _h1Bars;
+            DebugLog($"[DEBUG] FindAsianSessionFractals: h1Bars.Count = {h1Bars.Count}"); // Log H1 bars count
+
+            if (h1Bars.Count < FractalPeriod * 2 + 1) // Ensure enough bars for fractal calculation and loop
+            {
+                DebugLog($"[DEBUG] FindAsianSessionFractals: Not enough H1 bars ({h1Bars.Count}) for FractalPeriod {FractalPeriod}. Need at least {FractalPeriod * 2 + 1}. Skipping fractal search.");
+                return;
+            }
+
             var hourlyFractals = Indicators.Fractals(h1Bars, FractalPeriod);
             var today = Server.Time.Date;
-            //DebugLog($"[DEBUG] FindAsianSessionFractals: Поиск для тренда {trendContext} с FractalPeriod = {FractalPeriod}");
+            DebugLog($"[DEBUG] FindAsianSessionFractals: Starting search for {trendContext}. Today: {today:yyyy-MM-dd}, AsiaStartHour: {AsiaStartHour}, AsiaEndHour: {AsiaEndHour}, FractalPeriod: {FractalPeriod}");
 
             for (int i = FractalPeriod; i < h1Bars.Count - FractalPeriod; i++)
             {
                 var barTime = h1Bars.OpenTimes[i];
-                if (!(barTime.Date == today && barTime.Hour >= AsiaStartHour && barTime.Hour < AsiaEndHour))
+                bool isInAsianSession = barTime.Date == today && barTime.Hour >= AsiaStartHour && barTime.Hour < AsiaEndHour;
+                DebugLog($"[DEBUG] FindAsianSessionFractals: Checking H1 bar at index {i}, Time: {barTime:yyyy-MM-dd HH:mm}, IsInAsianSession: {isInAsianSession}");
+                
+                if (!isInAsianSession)
                     continue;
                 
                 // Для бычьего тренда ищем нижние фракталы для лонгов
                 if (trendContext == TrendContext.Bullish)
                 {
-                    if (!double.IsNaN(hourlyFractals.DownFractal[i]))
+                    double downFractalValue = hourlyFractals.DownFractal[i];
+                    DebugLog($"[DEBUG] FindAsianSessionFractals (Bullish): Bar {barTime:HH:mm}, Raw DownFractal[i]: {downFractalValue}");
+                    if (!double.IsNaN(downFractalValue))
                     {
                         _asianFractals.Add(new AsianFractal
                         {
-                            Level = hourlyFractals.DownFractal[i],
+                            Level = downFractalValue,
                             Time = barTime,
                             IsSwept = false
                         });
-                        DebugLog($"[DEBUG] Найден бычий (нижний) фрактал: {hourlyFractals.DownFractal[i]:F5} в {barTime}");
-                        // ИСПРАВЛЕНИЕ ЗДЕСЬ: убраны h1Open и т.д., так как они не нужны для этого события
-                        LogChartEvent(barTime, "ASIAN_FRACTAL", price1: hourlyFractals.DownFractal[i], tradeType: "Bullish", notes: "Lower fractal");
+                        DebugLog($"[DEBUG] FindAsianSessionFractals (Bullish): Added Asian H1 DownFractal. Level={downFractalValue:F5}, Time={barTime}");
+                        LogChartEvent(barTime, "ASIAN_FRACTAL", price1: downFractalValue, tradeType: "Bullish", notes: "Lower fractal");
                     }
                 }
                 // Для медвежьего тренда ищем верхние фракталы для шортов
                 else if (trendContext == TrendContext.Bearish)
                 {
-                    if (!double.IsNaN(hourlyFractals.UpFractal[i]))
+                    double upFractalValue = hourlyFractals.UpFractal[i];
+                    DebugLog($"[DEBUG] FindAsianSessionFractals (Bearish): Bar {barTime:HH:mm}, Raw UpFractal[i]: {upFractalValue}");
+                    if (!double.IsNaN(upFractalValue))
                     {
                         _asianFractals.Add(new AsianFractal
                         {
-                            Level = hourlyFractals.UpFractal[i],
+                            Level = upFractalValue,
                             Time = barTime,
                             IsSwept = false
                         });
-                        DebugLog($"[DEBUG] Найден медвежий (верхний) фрактал: {hourlyFractals.UpFractal[i]:F5} в {barTime}");
-                        // ИСПРАВЛЕНИЕ ЗДЕСЬ: убраны h1Open и т.д.
-                        LogChartEvent(barTime, "ASIAN_FRACTAL", price1: hourlyFractals.UpFractal[i], tradeType: "Bearish", notes: "Upper fractal");
+                        DebugLog($"[DEBUG] FindAsianSessionFractals (Bearish): Added Asian H1 UpFractal. Level={upFractalValue:F5}, Time={barTime}");
+                        LogChartEvent(barTime, "ASIAN_FRACTAL", price1: upFractalValue, tradeType: "Bearish", notes: "Upper fractal");
                     }
                 }
             }
@@ -1031,48 +1124,24 @@ namespace cAlgo.Robots
 
                 if (trendContext == TrendContext.Bullish || TrendMode == ManualTrendMode.Bullish)
                 {
-                    if (candidateBar.Low > fractal.BosLevel.Value)
+                    if (candidateBar.Close > fractal.BosLevel.Value)
                     {
-                        double distanceToBosLevelPips = (candidateBar.Close - fractal.BosLevel.Value) / Symbol.PipSize;
-                        DebugLog($"[BOS_DEBUG_BULL] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close} vs BOS Level (SweepBarHigh): {fractal.BosLevel.Value}. Dist: {distanceToBosLevelPips:F1} pips.");
-
-                        if (distanceToBosLevelPips <= MaxBOSDistancePips)
-                        {
-                            result.IsBreak = true;
-                            result.EntryPrice = candidateBar.Close;
-                            result.BreakTime = candidateBar.OpenTime;
-                            DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} > BOS Level: {fractal.BosLevel.Value}. Entry at market.");
-                            return result;
-                        }
-                        else
-                        {
-                            DebugLog($"[BOS_REJECT_BULL] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
-                            fractal.EntryDone = true;
-                            return result;
-                        }
+                        result.IsBreak = true;
+                        result.EntryPrice = candidateBar.Close;
+                        result.BreakTime = candidateBar.OpenTime;
+                        DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} > BOS Level: {fractal.BosLevel.Value}. Entry at market.");
+                        return result;
                     }
                 }
                 else if (trendContext == TrendContext.Bearish || TrendMode == ManualTrendMode.Bearish)
                 {
                     if (candidateBar.Close < fractal.BosLevel.Value)
                     {
-                        double distanceToBosLevelPips = (fractal.BosLevel.Value - candidateBar.Close) / Symbol.PipSize;
-                        DebugLog($"[BOS_DEBUG_BEAR] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close} vs BOS Level (SweepBarLow): {fractal.BosLevel.Value}. Dist: {distanceToBosLevelPips:F1} pips.");
-                        
-                        if (distanceToBosLevelPips <= MaxBOSDistancePips)
-                        {
-                            result.IsBreak = true;
-                            result.EntryPrice = candidateBar.Close;
-                            result.BreakTime = candidateBar.OpenTime;
-                            DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} < BOS Level: {fractal.BosLevel.Value}. Entry at market.");
-                            return result;
-                        }
-                        else
-                        {
-                             DebugLog($"[BOS_REJECT_BEAR] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
-                            fractal.EntryDone = true;
-                            return result;
-                        }
+                        result.IsBreak = true;
+                        result.EntryPrice = candidateBar.Close;
+                        result.BreakTime = candidateBar.OpenTime;
+                        DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} < BOS Level: {fractal.BosLevel.Value}. Entry at market.");
+                        return result;
                     }
                 }
             }
@@ -1142,7 +1211,7 @@ namespace cAlgo.Robots
             return context != TrendContext.Neutral;
         }
 
-        private void LogChartEvent(DateTime timestamp, string eventType, double? h1Open = null, double? h1High = null, double? h1Low = null, double? h1Close = null, double? price1 = null, double? price2 = null, string tradeType = "", string notes = "")
+        private void LogChartEvent(DateTime timestamp, string eventType, double? h1Open = null, double? h1High = null, double? h1Low = null, double? h1Close = null, double? price1 = null, double? price2 = null, double? price3 = null, string tradeType = "", string notes = "")
         {
             if (_chartDataWriter == null) return;
 
@@ -1154,18 +1223,25 @@ namespace cAlgo.Robots
                 string h1CloseStr = h1Close?.ToString(CultureInfo.InvariantCulture) ?? "";
                 string price1Str = price1?.ToString(CultureInfo.InvariantCulture) ?? "";
                 string price2Str = price2?.ToString(CultureInfo.InvariantCulture) ?? "";
+                string price3Str = price3?.ToString(CultureInfo.InvariantCulture) ?? "";
 
                 // Очистка notes от запятых и кавычек во избежание проблем с CSV
                 // Заменяем также точку с запятой в notes, так как она теперь наш основной разделитель
                 string sanitizedNotes = notes?.Replace(";", ":")?.Replace(",", ".")?.Replace("\"", "'") ?? "";
 
                 // Изменяем разделитель на точку с запятой
-                _chartDataWriter.WriteLine($"{timestamp:yyyy-MM-ddTHH:mm:ss};{eventType};{h1OpenStr};{h1HighStr};{h1LowStr};{h1CloseStr};{price1Str};{price2Str};{tradeType};{sanitizedNotes}");
+                _chartDataWriter.WriteLine($"{timestamp:yyyy-MM-dd HH:mm:ss.fff};{eventType};{h1OpenStr};{h1HighStr};{h1LowStr};{h1CloseStr};{price1Str};{price2Str};{price3Str};{tradeType};{sanitizedNotes}");
             }
             catch (Exception ex)
             {
                 Print($"Error writing to chart data file: {ex.Message}");
             }
+        }
+
+        // Helper function for manual price normalization
+        private double NormalizePriceManually(double price)
+        {
+            return Math.Round(price, Symbol.Digits);
         }
     }
 

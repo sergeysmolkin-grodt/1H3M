@@ -1,6 +1,8 @@
 using System;
 using System.Linq;
 using System.Collections.Generic;
+using System.IO;
+using System.Globalization;
 using cAlgo.API;
 using cAlgo.API.Collections;
 using cAlgo.API.Indicators;
@@ -52,15 +54,18 @@ namespace cAlgo.Robots
         private double? _currentFractalLevel = null;
         private Bars _m3Bars;
         private Bars _h1Bars;
-        private DateTime _lastH1BarTime = DateTime.MinValue; // <<< ДОБАВЛЕНО
-        // --- Asia session time helpers ---
-        private static readonly int AsiaStartHour = 0; // 00:00 UTC+3
-        private static readonly int AsiaEndHour = 9;   // 09:00 UTC+3
+        private DateTime _lastH1BarTime = DateTime.MinValue;
+        private static readonly int AsiaStartHour = 0;
+        private static readonly int AsiaEndHour = 9;
         private DateTime _lastTradeDate = DateTime.MinValue;
-        private bool _loggedSpecificBarData = false; // Флаг, чтобы залогировать данные только один раз
-        private bool _loggedSpecificBarDataThisInstance = false; // Added for specific bar logging
-        private DateTime _debugSpecificTimestamp = DateTime.MinValue; // Declare _debugSpecificTimestamp
-        private HashSet<DateTime> _loggedOHLCBarsForTargetDate = new HashSet<DateTime>(); // For M3 OHLC logging
+        // private bool _loggedSpecificBarData = false; // Флаг, чтобы залогировать данные только один раз - Warning CS0414, комментируем
+        private bool _loggedSpecificBarDataThisInstance = false;
+        private DateTime _debugSpecificTimestamp = DateTime.MinValue;
+        private HashSet<DateTime> _loggedOHLCBarsForTargetDate = new HashSet<DateTime>();
+
+        private StreamWriter _chartDataWriter;
+        private string _csvFilePath;
+        private static readonly string CSV_HEADER = "Timestamp,EventType,H1_Open,H1_High,H1_Low,H1_Close,Price1,Price2,TradeType,Notes";
 
         protected override void OnStart()
         {
@@ -68,9 +73,25 @@ namespace cAlgo.Robots
             _m3Bars = MarketData.GetBars(TimeFrame.Minute3);
             _h1Bars = MarketData.GetBars(TimeFrame.Hour);
 
-            // For 14.05.2025 debugging:
-            _debugSpecificTimestamp = new DateTime(2025, 5, 14, 6, 15, 0, DateTimeKind.Utc); // For Is3mStructureBreak logging of 06:15 bar
-            _loggedOHLCBarsForTargetDate.Clear(); // Reset for this run
+            _debugSpecificTimestamp = new DateTime(2025, 5, 14, 6, 15, 0, DateTimeKind.Utc);
+            _loggedOHLCBarsForTargetDate.Clear();
+
+            try
+            {
+                string robotName = GetType().Name;
+                string logsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "cAlgo", "Robots", "Logs", robotName);
+                Directory.CreateDirectory(logsDirectory);
+                _csvFilePath = Path.Combine(logsDirectory, $"{robotName}_ChartData_{SymbolName.Replace("/", "")}_{Server.Time:yyyyMMddHHmmss}.csv");
+                
+                _chartDataWriter = new StreamWriter(_csvFilePath, false, System.Text.Encoding.UTF8);
+                _chartDataWriter.WriteLine(CSV_HEADER);
+                Print($"Chart data logging started. File: {_csvFilePath}");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error initializing chart data logger: {ex.Message}");
+                _chartDataWriter = null;
+            }
         }
 
         private double? FindNearestFractalLevel(TradeType tradeType, double currentPrice)
@@ -378,9 +399,10 @@ namespace cAlgo.Robots
 
             if (result.IsSuccessful)
             {
-                fractal.EntryDone = true; // Mark fractal as used for entry
-                _lastTradeDate = Server.Time.Date; // Update last trade date
+                fractal.EntryDone = true;
+                _lastTradeDate = Server.Time.Date;
                 DebugLog($"[TRADE_OPEN] {tradeType} order successful. Price: {result.Position.EntryPrice}, SL: {slPrice} (Basis: {slCalculationBasis}), TP: {tpResult.takeProfitPrice} (RR: {tpResult.rr}). Size: {positionSize}");
+                LogChartEvent(result.Position.EntryTime, "TRADE_ENTRY", price1: result.Position.EntryPrice, price2: slPrice, tradeType: tradeType.ToString(), notes: $"TP: {tpResult.takeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}, Label: {label}");
             }
             else
             {
@@ -722,44 +744,32 @@ namespace cAlgo.Robots
 
         protected override void OnTick()
         {
-            _loggedSpecificBarDataThisInstance = false; // Reset this flag at the start of each OnTick
+            _loggedSpecificBarDataThisInstance = false;
 
-            // --- Logging specific M3 bars for 14.05.2025 ---
-            if (Server.Time.Date == new DateTime(2025, 5, 14) && _m3Bars.Count > 0)
-            {
-                var targetTimesToLog = new List<DateTime>
-                {
-                    new DateTime(2025, 5, 14, 6, 3, 0, DateTimeKind.Utc),
-                    new DateTime(2025, 5, 14, 6, 15, 0, DateTimeKind.Utc)
-                };
-
-                // Check the last few M3 bars to see if they match our target times
-                for (int i = 0; i < Math.Min(5, _m3Bars.Count); i++) 
-                {
-                    var bar = _m3Bars.Last(i);
-                    if (targetTimesToLog.Contains(bar.OpenTime) && !_loggedOHLCBarsForTargetDate.Contains(bar.OpenTime))
-                    {
-                        DebugLog($"[DEBUG_OHLC_M3] Time: {bar.OpenTime:HH:mm:ss}, O={bar.Open:F5}, H={bar.High:F5}, L={bar.Low:F5}, C={bar.Close:F5}");
-                        _loggedOHLCBarsForTargetDate.Add(bar.OpenTime);
-                    }
-                }
-            }
-            // --- End of specific M3 bar logging ---
-
-            if (Bars.TimeFrame != TimeFrame.Hour) // Убедимся, что OnTick работает на основном таймфрейме робота (H1)
+            if (Bars.TimeFrame != TimeFrame.Hour) 
             {
                 DebugLog($"[DEBUG] Неверный таймфрейм для OnTick: {Bars.TimeFrame}");
                 return;
             }
 
-            TrendContext trendContext; // Объявляем переменную для тренда
+            // --- Логирование H1 бара (корректное местоположение) ---
+            if (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime != _lastH1BarTime)
+            {
+                // Эта проверка гарантирует, что мы на H1 (из проверки выше) и что это новый H1 бар
+                var h1Bar = _h1Bars.Last(0);
+                LogChartEvent(h1Bar.OpenTime, "H1_BAR", h1Open: h1Bar.Open, h1High: h1Bar.High, h1Low: h1Bar.Low, h1Close: h1Bar.Close);
+                // _lastH1BarTime будет обновлен в FindAsianSessionFractals или принудительно позже,
+                // но здесь важно залогировать H1 бар при его фактическом формировании для OnTick.
+            }
+            // --- Конец логирования H1 бара ---
+
+            TrendContext trendContext;
             var currentPrice = Symbol.Bid; // Для лонгов используем Bid, для шортов Ask
 
             if (Server.Time.Date != _lastAsianSessionCheck) // Проверяем один раз в день в начале дня
             {
                 CheckAsianSession(); // Определяем, находимся ли мы в Азиатской сессии
                 _lastAsianSessionCheck = Server.Time.Date;
-                //DebugLog($"[DEBUG] MaxTrackedFractals Parameter Value: {MaxTrackedFractals}"); // <--- ЗАКОММЕНТИРОВАНО
             }
 
             if (!IsStrongTrend(out trendContext))
@@ -779,41 +789,97 @@ namespace cAlgo.Robots
                 return;
             }
             
-            // --- Оптимизация вызова FindAsianSessionFractals ---
             bool shouldFindFractals = _asianFractals.Count == 0 || (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime > _lastH1BarTime);
-            if (shouldFindFractals && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date) // Дополнительно проверяем, что не ищем для прошлого дня, если уже есть фракталы
+            if (shouldFindFractals && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date)
             {
                 DebugLog($"[DEBUG] Поиск фракталов в азиатскую сессию для тренда: {trendContext}...");
                 FindAsianSessionFractals(trendContext);
                 if (_h1Bars.Count > 0)
                 {
-                    _lastH1BarTime = _h1Bars.Last(0).OpenTime; // Обновляем время последнего H1 бара
+                    _lastH1BarTime = _h1Bars.Last(0).OpenTime;
                 }
             }
             else if (_asianFractals.Count > 0 && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date)
             {
-                // Если текущая дата не совпадает с датой найденных фракталов, значит наступил новый день,
-                // и нужно очистить старые фракталы и запустить поиск новых.
                 DebugLog($"[DEBUG] Наступил новый день ({Server.Time.Date}), а фракталы от {_asianFractals.FirstOrDefault()?.Time.Date}. Очистка и поиск новых.");
                 _asianFractals.Clear();
-                _lastH1BarTime = DateTime.MinValue; // Сбрасываем время H1 бара для нового дня
-                FindAsianSessionFractals(trendContext); // Поиск для нового дня
+                _lastH1BarTime = DateTime.MinValue;
+                FindAsianSessionFractals(trendContext);
                 if (_h1Bars.Count > 0)
                 {
                     _lastH1BarTime = _h1Bars.Last(0).OpenTime;
                 }
             }
-            // --- Конец оптимизации ---
             
             DebugLog($"[DEBUG] Проверка свипа фракталов для тренда: {trendContext}...");
             CheckFractalsSweep(trendContext);
+            
+            foreach (var fractal in _asianFractals.Where(f => f.IsSwept && !f.EntryDone && f.BosLevel.HasValue).ToList())
+            {
+                TradeType entryTradeType;
+                if (trendContext == TrendContext.Bullish)
+                {
+                    entryTradeType = TradeType.Buy;
+                }
+                else if (trendContext == TrendContext.Bearish)
+                {
+                    entryTradeType = TradeType.Sell;
+                }
+                else
+                {
+                    continue; 
+                }
+
+                var bosResult = Is3mStructureBreak(fractal, trendContext);
+                if (bosResult.IsBreak)
+                {
+                    // Логирование BOS
+                    if (fractal.LastBosCheckBarIndex >= 0 && fractal.LastBosCheckBarIndex < _m3Bars.Count)
+                    {
+                        Bar m3BosBar = _m3Bars[fractal.LastBosCheckBarIndex];
+                        LogChartEvent(bosResult.BreakTime, 
+                                      "BOS_CONFIRMED", 
+                                      h1Open: m3BosBar.Open, // Прямой доступ, т.к. Bar - структура
+                                      h1High: m3BosBar.High,
+                                      h1Low: m3BosBar.Low,
+                                      h1Close: m3BosBar.Close,
+                                      price1: bosResult.EntryPrice, 
+                                      tradeType: entryTradeType.ToString(), 
+                                      notes: $"Fractal Level: {fractal.Level.ToString(CultureInfo.InvariantCulture)}. M3 Bar Time: {m3BosBar.OpenTime.ToString("HH:mm:ss")}");
+                    }
+                    else
+                    {
+                        // Логируем BOS без данных M3 бара, если он не доступен
+                        LogChartEvent(bosResult.BreakTime, 
+                                      "BOS_CONFIRMED", 
+                                      price1: bosResult.EntryPrice, 
+                                      tradeType: entryTradeType.ToString(), 
+                                      notes: $"Fractal Level: {fractal.Level.ToString(CultureInfo.InvariantCulture)}. M3 Bar data unavailable.");
+                    }
+                    
+                    EnterPosition(entryTradeType, bosResult.EntryPrice, fractal);
+                }
+            }
             
             DebugLog($"[DEBUG] ======= КОНЕЦ ТИКА ======= {Server.Time} =======");
         }
 
         protected override void OnStop()
         {
-            // Handle cBot stop here
+            if (_chartDataWriter != null)
+            {
+                try
+                {
+                    _chartDataWriter.Flush();
+                    _chartDataWriter.Close();
+                    Print("Chart data logging stopped.");
+                }
+                catch (Exception ex)
+                {
+                    Print($"Error closing chart data logger: {ex.Message}");
+                }
+                _chartDataWriter = null;
+            }
         }
 
         private void FindAsianSessionFractals(TrendContext trendContext)
@@ -822,7 +888,6 @@ namespace cAlgo.Robots
             var h1Bars = _h1Bars;
             var hourlyFractals = Indicators.Fractals(h1Bars, FractalPeriod);
             var today = Server.Time.Date;
-            //DebugLog($"[DEBUG] FindAsianSessionFractals: Поиск для тренда {trendContext} с FractalPeriod = {FractalPeriod}");
 
             for (int i = FractalPeriod; i < h1Bars.Count - FractalPeriod; i++)
             {
@@ -830,7 +895,6 @@ namespace cAlgo.Robots
                 if (!(barTime.Date == today && barTime.Hour >= AsiaStartHour && barTime.Hour < AsiaEndHour))
                     continue;
                 
-                // Для бычьего тренда ищем нижние фракталы для лонгов
                 if (trendContext == TrendContext.Bullish)
                 {
                     if (!double.IsNaN(hourlyFractals.DownFractal[i]))
@@ -842,9 +906,9 @@ namespace cAlgo.Robots
                             IsSwept = false
                         });
                         DebugLog($"[DEBUG] Найден бычий (нижний) фрактал: {hourlyFractals.DownFractal[i]:F5} в {barTime}");
+                        LogChartEvent(barTime, "ASIAN_FRACTAL", price1: hourlyFractals.DownFractal[i], tradeType: "Bullish", notes: "Lower fractal");
                     }
                 }
-                // Для медвежьего тренда ищем верхние фракталы для шортов
                 else if (trendContext == TrendContext.Bearish)
                 {
                     if (!double.IsNaN(hourlyFractals.UpFractal[i]))
@@ -856,22 +920,22 @@ namespace cAlgo.Robots
                             IsSwept = false
                         });
                         DebugLog($"[DEBUG] Найден медвежий (верхний) фрактал: {hourlyFractals.UpFractal[i]:F5} в {barTime}");
+                        LogChartEvent(barTime, "ASIAN_FRACTAL", price1: hourlyFractals.UpFractal[i], tradeType: "Bearish", notes: "Upper fractal");
                     }
                 }
             }
             
-            // Сортируем фракталы
-            var currentPrice = Bars.ClosePrices.Last(0); // <--- ОБЪЯВЛЕНИЕ currentPrice ВОЗВРАЩЕНО
+            var currentPrice = Bars.ClosePrices.Last(0);
             if (trendContext == TrendContext.Bullish)
             {
-                _asianFractals = _asianFractals.OrderBy(f => f.Level).ToList(); // Closest (lowest) for bullish
+                _asianFractals = _asianFractals.OrderBy(f => f.Level).ToList();
             }
             else if (trendContext == TrendContext.Bearish)
             {
-                _asianFractals = _asianFractals.OrderByDescending(f => f.Level).ToList(); // Closest (highest) for bearish
+                _asianFractals = _asianFractals.OrderByDescending(f => f.Level).ToList();
             }
 
-            if (today == new DateTime(2025, 5, 14)) // Логируем только для целевой даты
+            if (today == new DateTime(2025, 5, 14))
             {
                 foreach (var f in _asianFractals)
                 {
@@ -882,58 +946,58 @@ namespace cAlgo.Robots
 
         private void CheckFractalsSweep(TrendContext trendContext)
         {
-            var m3Bars = _m3Bars; // MarketData.GetBars(TimeFrame.Minute3);
+            var m3Bars = _m3Bars;
             if (m3Bars.Count < FractalPeriod * 2 + 1) return;
 
-            var currentM3Bar = m3Bars.Last(1); // Last completed M3 bar
+            var currentM3Bar = m3Bars.Last(1);
 
             foreach (var fractal in _asianFractals.Where(f => !f.IsSwept && !f.EntryDone).ToList())
             {
-                // Ensure we only check sweeps during or after the fractal formation time
                 if (currentM3Bar.OpenTime < fractal.Time) continue;
 
                 bool sweptThisTick = false;
+                string sweepType = "";
 
-                if (trendContext == TrendContext.Bullish || TrendMode == ManualTrendMode.Bullish) // Looking for bullish entries
+                if (trendContext == TrendContext.Bullish || TrendMode == ManualTrendMode.Bullish)
                 {
-                    // Check for sweep of LOW fractal
                     if (currentM3Bar.Low < fractal.Level)
                     {
                         fractal.IsSwept = true;
                         sweptThisTick = true;
                         fractal.SweepLevel = fractal.Level;
-                        fractal.SweepExtreme = currentM3Bar.Low; // Low of the bar that swept
-                        fractal.SweepBarIndex = m3Bars.Count - 2; // Index of the bar that swept (currentM3Bar is Last(1), so its index is Count-2 in 0-based)
+                        fractal.SweepExtreme = currentM3Bar.Low;
+                        fractal.SweepBarIndex = m3Bars.Count - 2;
 
-                        // BOS level is the HIGH of the sweep bar
-                        fractal.BosLevel = currentM3Bar.High; 
-                        fractal.LastBosCheckBarIndex = m3Bars.Count -2; // Reset BOS check index for this fractal
+                        fractal.BosLevel = currentM3Bar.High;
+                        fractal.LastBosCheckBarIndex = m3Bars.Count - 2;
 
                         DebugLog($"[SWEEP_BULL] Low fractal {fractal.Level} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar L: {currentM3Bar.Low}, H: {currentM3Bar.High}. New BOS Level: {fractal.BosLevel}");
+                        sweptThisTick = true;
+                        sweepType = "BullishSweep";
                     }
                 }
-                else if (trendContext == TrendContext.Bearish || TrendMode == ManualTrendMode.Bearish) // Looking for bearish entries
+                else if (trendContext == TrendContext.Bearish || TrendMode == ManualTrendMode.Bearish)
                 {
-                    // Check for sweep of HIGH fractal
                     if (currentM3Bar.High > fractal.Level)
                     {
                         fractal.IsSwept = true;
                         sweptThisTick = true;
                         fractal.SweepLevel = fractal.Level;
-                        fractal.SweepExtreme = currentM3Bar.High; // High of the bar that swept
+                        fractal.SweepExtreme = currentM3Bar.High;
                         fractal.SweepBarIndex = m3Bars.Count - 2;
 
-                        // BOS level is the LOW of the sweep bar
                         fractal.BosLevel = currentM3Bar.Low;
                         fractal.LastBosCheckBarIndex = m3Bars.Count - 2;
 
                         DebugLog($"[SWEEP_BEAR] High fractal {fractal.Level} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar H: {currentM3Bar.High}, L: {currentM3Bar.Low}. New BOS Level: {fractal.BosLevel}");
+                        sweptThisTick = true;
+                        sweepType = "BearishSweep";
                     }
                 }
 
                 if (sweptThisTick)
                 {
-                    // Additional logic after a sweep can be placed here if needed immediately
+                    LogChartEvent(currentM3Bar.OpenTime, "SWEEP", price1: fractal.SweepLevel, price2: fractal.SweepExtreme, tradeType: sweepType, notes: $"Original fractal at {fractal.Time.ToString("HH:mm:ss")} level {fractal.Level.ToString(CultureInfo.InvariantCulture)}");
                 }
             }
         }
@@ -942,7 +1006,7 @@ namespace cAlgo.Robots
         {
             public bool IsBreak { get; set; }
             public double EntryPrice { get; set; }
-            public DateTime BreakTime { get; set; } // Добавим время слома
+            public DateTime BreakTime { get; set; }
         }
 
         private StructureBreakResult Is3mStructureBreak(AsianFractal fractal, TrendContext trendContext)
@@ -950,42 +1014,32 @@ namespace cAlgo.Robots
             var result = new StructureBreakResult { IsBreak = false };
             if (fractal == null || !fractal.IsSwept || fractal.BosLevel == null || fractal.SweepBarIndex == null)
             {
-                //DebugLog($"[BOS_CHECK_SKIP] Fractal not ready for BOS check. IsSwept: {fractal?.IsSwept}, BosLevel: {fractal?.BosLevel}, SweepBarIndex: {fractal?.SweepBarIndex}");
                 return result;
             }
 
-            var m3Bars = _m3Bars; //MarketData.GetBars(TimeFrame.Minute3);
-            if (m3Bars.Count < fractal.SweepBarIndex.Value + 2) // Need at least one bar after sweep bar
+            var m3Bars = _m3Bars;
+            if (m3Bars.Count < fractal.SweepBarIndex.Value + 2)
             {
-                //DebugLog($"[BOS_CHECK_SKIP] Not enough M3 bars after sweep bar for BOS check. M3Bars: {m3Bars.Count}, SweepBarIndex: {fractal.SweepBarIndex.Value}");
                 return result;
             }
             
-            // Start checking from the bar AFTER the sweep bar up to the latest completed bar
-            // The sweep bar itself cannot be the BOS bar with this logic (Close > its own High/Low)
-            // SweepBarIndex is 0-based index of the bar that performed the sweep.
-            // So, the first potential BOS bar is at index SweepBarIndex + 1.
-            // m3Bars.Count - 1 is the index of the latest completed bar.
             int firstPotentialBosBarIndex = fractal.SweepBarIndex.Value + 1;
 
-            // We should only check new bars for BOS
             int startIndexToCheck = Math.Max(firstPotentialBosBarIndex, fractal.LastBosCheckBarIndex + 1);
 
             for (int i = startIndexToCheck; i < m3Bars.Count; i++)
             {
                 var candidateBar = m3Bars[i];
-                fractal.LastBosCheckBarIndex = i; // Update last checked bar index
+                fractal.LastBosCheckBarIndex = i;
 
-                // Debug specific bar if it matches
                 if (candidateBar.OpenTime == _debugSpecificTimestamp && !_loggedSpecificBarDataThisInstance)
                 {
                      DebugLog($"[DEBUG_OHLC_BAR_SPECIFIC_FOR_BOS_CHECK] Target Time: {_debugSpecificTimestamp}. Bar {candidateBar.OpenTime} (Index {i}) O:{candidateBar.Open} H:{candidateBar.High} L:{candidateBar.Low} C:{candidateBar.Close} Vol:{candidateBar.TickVolume}. Checking against BOS level: {fractal.BosLevel}");
-                    _loggedSpecificBarDataThisInstance = true; // Log only once per OnTick instance for this specific bar
+                    _loggedSpecificBarDataThisInstance = true;
                 }
 
                 if (trendContext == TrendContext.Bullish || TrendMode == ManualTrendMode.Bullish)
                 {
-                    // BOS Level for Bullish is High of the sweep bar
                     if (candidateBar.Low > fractal.BosLevel.Value)
                     {
                         double distanceToBosLevelPips = (candidateBar.Close - fractal.BosLevel.Value) / Symbol.PipSize;
@@ -994,22 +1048,21 @@ namespace cAlgo.Robots
                         if (distanceToBosLevelPips <= MaxBOSDistancePips)
                         {
                             result.IsBreak = true;
-                            result.EntryPrice = candidateBar.Close; // Or Open of next bar, for now, Close of confirming bar
+                            result.EntryPrice = candidateBar.Close;
                             result.BreakTime = candidateBar.OpenTime;
                             DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} > BOS Level: {fractal.BosLevel.Value}. Entry at market.");
-                            return result; // BOS found
+                            return result;
                         }
                         else
                         {
                             DebugLog($"[BOS_REJECT_BULL] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
-                            fractal.EntryDone = true; // Invalidate fractal if BOS is too far
-                            return result; // Stop checking for this fractal
+                            fractal.EntryDone = true;
+                            return result;
                         }
                     }
                 }
                 else if (trendContext == TrendContext.Bearish || TrendMode == ManualTrendMode.Bearish)
                 {
-                    // BOS Level for Bearish is Low of the sweep bar
                     if (candidateBar.Close < fractal.BosLevel.Value)
                     {
                         double distanceToBosLevelPips = (fractal.BosLevel.Value - candidateBar.Close) / Symbol.PipSize;
@@ -1021,50 +1074,41 @@ namespace cAlgo.Robots
                             result.EntryPrice = candidateBar.Close;
                             result.BreakTime = candidateBar.OpenTime;
                             DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} < BOS Level: {fractal.BosLevel.Value}. Entry at market.");
-                            return result; // BOS found
+                            return result;
                         }
                         else
                         {
                              DebugLog($"[BOS_REJECT_BEAR] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
-                            fractal.EntryDone = true; // Invalidate fractal if BOS is too far
-                            return result; // Stop checking for this fractal
+                            fractal.EntryDone = true;
+                            return result;
                         }
                     }
                 }
             }
-            return result; // No BOS found on checked bars
+            return result;
         }
 
         private bool IsInAsiaSession(DateTime time)
         {
-            int hour = time.Hour; // time is expected to be UTC
-            // Asia session 00:00-09:00 local time (e.g. UTC+3) corresponds to 21:00 (previous day) - 06:00 UTC.
-            // The current implementation hour >= 0 && hour < 6 covers 00:00-05:59 UTC.
-            // This definition means Asian session ends just as Frankfurt UTC starts.
+            int hour = time.Hour;
             return hour >= 0 && hour < 6; 
         }
         private bool IsInFrankfurtSession(DateTime time)
         {
-            // Frankfurt: 09:00 - 10:00 local time (e.g. UTC+3)
-            // Corresponds to 06:00 - 07:00 UTC
-            int hour = time.Hour; // time is UTC
+            int hour = time.Hour;
             return hour >= 6 && hour < 7;
         }
         private bool IsInLondonSession(DateTime time)
         {
-            // London: 10:00 - 15:00 local time (e.g. UTC+3)
-            // Corresponds to 07:00 - 12:00 UTC
-            int hour = time.Hour; // time is UTC
+            int hour = time.Hour;
             return hour >= 7 && hour < 12;
         }
 
-        // Добавим новый метод для поиска ключевых уровней
         private double? FindKeyLevelForTP(TradeType tradeType, double entryPrice)
         {
             var h1Bars = _h1Bars;
             if (h1Bars.Count < 10) return null;
             
-            // Находим максимумы и минимумы за последние 24 часа
             double highest = double.MinValue;
             double lowest = double.MaxValue;
             int lookback = Math.Min(24, h1Bars.Count);
@@ -1077,29 +1121,25 @@ namespace cAlgo.Robots
             
             if (tradeType == TradeType.Buy)
             {
-                // Для лонга ищем уровень выше текущей цены
                 if (highest > entryPrice)
                 {
                     DebugLog($"[DEBUG] Найден ключевой уровень для лонга (максимум 24ч): {highest:F5}");
                     return highest;
                 }
                 
-                // Если максимум не подходит, используем уровень на основе текущей цены
-                double targetLevel = entryPrice + (entryPrice - lowest) * 0.618; // 61.8% фибо
+                double targetLevel = entryPrice + (entryPrice - lowest) * 0.618;
                 DebugLog($"[DEBUG] Расчетный ключевой уровень для лонга: {targetLevel:F5}");
                 return targetLevel;
             }
             else
             {
-                // Для шорта ищем уровень ниже текущей цены
                 if (lowest < entryPrice)
                 {
                     DebugLog($"[DEBUG] Найден ключевой уровень для шорта (минимум 24ч): {lowest:F5}");
                     return lowest;
                 }
                 
-                // Если минимум не подходит, используем уровень на основе текущей цены
-                double targetLevel = entryPrice - (highest - entryPrice) * 0.618; // 61.8% фибо
+                double targetLevel = entryPrice - (highest - entryPrice) * 0.618;
                 DebugLog($"[DEBUG] Расчетный ключевой уровень для шорта: {targetLevel:F5}");
                 return targetLevel;
             }
@@ -1109,6 +1149,29 @@ namespace cAlgo.Robots
         {
             context = SimpleTrendContext();
             return context != TrendContext.Neutral;
+        }
+
+        private void LogChartEvent(DateTime timestamp, string eventType, double? h1Open = null, double? h1High = null, double? h1Low = null, double? h1Close = null, double? price1 = null, double? price2 = null, string tradeType = "", string notes = "")
+        {
+            if (_chartDataWriter == null) return;
+
+            try
+            {
+                string h1OpenStr = h1Open?.ToString(CultureInfo.InvariantCulture) ?? "";
+                string h1HighStr = h1High?.ToString(CultureInfo.InvariantCulture) ?? "";
+                string h1LowStr = h1Low?.ToString(CultureInfo.InvariantCulture) ?? "";
+                string h1CloseStr = h1Close?.ToString(CultureInfo.InvariantCulture) ?? "";
+                string price1Str = price1?.ToString(CultureInfo.InvariantCulture) ?? "";
+                string price2Str = price2?.ToString(CultureInfo.InvariantCulture) ?? "";
+
+                string sanitizedNotes = notes?.Replace(",", ";")?.Replace("\"", "'") ?? "";
+
+                _chartDataWriter.WriteLine($"{timestamp:yyyy-MM-ddTHH:mm:ss},{eventType},{h1OpenStr},{h1HighStr},{h1LowStr},{h1CloseStr},{price1Str},{price2Str},{tradeType},{sanitizedNotes}");
+            }
+            catch (Exception ex)
+            {
+                Print($"Error writing to chart data file: {ex.Message}");
+            }
         }
     }
 

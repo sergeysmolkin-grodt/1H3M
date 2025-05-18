@@ -100,6 +100,8 @@ def generate_lightweight_chart_html(csv_file_path, output_html_path="lightweight
             }},
             priceScale: {{
                 borderColor: 'rgba(197, 203, 206, 0.8)',
+                precision: 5,
+                minMove: 0.00001
             }},
             timeScale: {{
                 borderColor: 'rgba(197, 203, 206, 0.8)',

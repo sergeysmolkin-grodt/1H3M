@@ -38,6 +38,12 @@ namespace cAlgo.Robots
         [Parameter("Broker Min Stop Level Pips", DefaultValue = 2.0, MinValue = 0.0)]
         public double BrokerMinStopLevelPips { get; set; }
 
+        [Parameter("Enable RR Filter", DefaultValue = false)]
+        public bool EnableRRFilter { get; set; }
+
+        [Parameter("Strict TP Validation", DefaultValue = false)]
+        public bool StrictTPValidation { get; set; }
+
         private const double _minRR = 1.3;
         private const double _maxRR = 5.0;
         private const int H1_TP_FRACTAL_PERIOD = 10; // New constant for H1 TP fractals
@@ -340,10 +346,10 @@ namespace cAlgo.Robots
             (double? takeProfitPriceCalculated, double rr) tpResult = CalculateTakeProfit(tradeType, entryPrice, slPriceNormalized);
             DebugLog($"[DEBUG_ENTER_POS] TP Calculated: {tpResult.takeProfitPriceCalculated?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString(CultureInfo.InvariantCulture)}");
 
-            if (!tpResult.takeProfitPriceCalculated.HasValue || tpResult.rr < _minRR || tpResult.rr > _maxRR)
+             if (!tpResult.takeProfitPriceCalculated.HasValue || (EnableRRFilter && (tpResult.rr < _minRR || tpResult.rr > _maxRR)))
             {
-                DebugLog($"[DEBUG_ENTER_POS] TP/RR criteria not met. TP: {tpResult.takeProfitPriceCalculated?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString(CultureInfo.InvariantCulture)}. MinRR: {_minRR}, MaxRR: {_maxRR}");
-                LogChartEvent(Server.Time, "TP_RR_REJECT", price1: entryPrice, price2: slPriceNormalized, price3: tpResult.takeProfitPriceCalculated, tradeType: tradeType.ToString(), notes: $"Calculated RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}");
+                DebugLog($"[DEBUG_ENTER_POS] TP/RR criteria not met or TP unavailable. TP: {tpResult.takeProfitPriceCalculated?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString(CultureInfo.InvariantCulture)}");
+                LogChartEvent(Server.Time, EnableRRFilter ? "TP_RR_REJECT" : "TP_CALC_FAILED", price1: entryPrice, price2: slPriceNormalized, tradeType: tradeType.ToString(), notes: $"RR: {tpResult.rr:F2}");
                 fractal.EntryDone = true; 
                 return;
             }
@@ -363,7 +369,7 @@ namespace cAlgo.Robots
                     slPriceNormalized = NormalizePriceManually(entryPrice - minStopDistance);
                     DebugLog($"[DEBUG_ENTER_POS] SL for BUY adjusted due to StopLevel. New SL: {slPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
                 }
-                if (tpPriceNormalized - entryPrice < minStopDistance)
+                if (StrictTPValidation && tpPriceNormalized - entryPrice < minStopDistance)
                 {
                     tpPriceNormalized = NormalizePriceManually(entryPrice + minStopDistance);
                     DebugLog($"[DEBUG_ENTER_POS] TP for BUY adjusted due to StopLevel. New TP: {tpPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
@@ -376,12 +382,13 @@ namespace cAlgo.Robots
                     slPriceNormalized = NormalizePriceManually(entryPrice + minStopDistance);
                     DebugLog($"[DEBUG_ENTER_POS] SL for SELL adjusted due to StopLevel. New SL: {slPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
                 }
-                if (entryPrice - tpPriceNormalized < minStopDistance)
+                if (StrictTPValidation && entryPrice - tpPriceNormalized < minStopDistance)
                 {
                     tpPriceNormalized = NormalizePriceManually(entryPrice - minStopDistance);
                     DebugLog($"[DEBUG_ENTER_POS] TP for SELL adjusted due to StopLevel. New TP: {tpPriceNormalized.ToString(CultureInfo.InvariantCulture)}");
                 }
             }
+
             
             // Recalculate RR with potentially adjusted SL/TP
             // Important: This might change the RR and it could fall out of the desired _minRR/_maxRR range.

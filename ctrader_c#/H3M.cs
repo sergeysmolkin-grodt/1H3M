@@ -41,7 +41,7 @@ namespace cAlgo.Robots
         private const double _minRR = 1.3;
         private const double _maxRR = 5.0;
         private const int H1_TP_FRACTAL_PERIOD = 10; // New constant for H1 TP fractals
-        private const double ASIAN_FRACTAL_SL_FIXED_BUFFER_PIPS = 1.5; // Fixed buffer for Asian fractal SL
+        private const double ASIAN_FRACTAL_SL_FIXED_BUFFER_PIPS = 1.5; // Fixed buffher for Asian fractal SL
 
         private Fractals _fractals;
         private List<AsianFractal> _asianFractals = new List<AsianFractal>();

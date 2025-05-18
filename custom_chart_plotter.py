@@ -1,11 +1,11 @@
 import pandas as pd
-import mplfinance as mpf
 import argparse
-import matplotlib.pyplot as plt
+import json
+import os
 
-def plot_custom_chart(csv_file_path):
+def generate_lightweight_chart_html(csv_file_path, output_html_path="lightweight_chart.html"):
     try:
-        df = pd.read_csv(csv_file_path)
+        df = pd.read_csv(csv_file_path, delimiter=';')
     except FileNotFoundError:
         print(f"Ошибка: CSV файл не найден по пути: {csv_file_path}")
         return
@@ -13,272 +13,166 @@ def plot_custom_chart(csv_file_path):
         print(f"Ошибка при чтении CSV файла: {e}")
         return
 
-    # Преобразование Timestamp в datetime объекты и установка как индекса
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-    df = df.set_index(pd.DatetimeIndex(df['Timestamp']))
 
-    # Данные для основного графика H1 свечей
-    h1_bars_df = df[df['EventType'] == 'H1_BAR'].copy() # Используем .copy() для избежания SettingWithCopyWarning
+    h1_bars_df = df[df['EventType'] == 'H1_BAR'].copy()
     if h1_bars_df.empty:
         print("Нет данных H1_BAR для отображения.")
         return
         
-    h1_bars_df.rename(columns={
-        'H1_Open': 'Open',
-        'H1_High': 'High',
-        'H1_Low': 'Low',
-        'H1_Close': 'Close'
-    }, inplace=True)
-    
-    # Убедимся, что колонки имеют числовой тип
-    ohlc_cols = ['Open', 'High', 'Low', 'Close']
-    for col in ohlc_cols:
-        h1_bars_df[col] = pd.to_numeric(h1_bars_df[col], errors='coerce')
-    
-    h1_bars_df = h1_bars_df[ohlc_cols].dropna()
-
-
-    # Подготовка дополнительных графических элементов (addplot)
-    ap_elements = []
-    additional_plots_data = {} # Данные для addplot
-
-    # Маркеры для событий
-    event_markers = {
-        'ASIAN_FRACTAL_Bullish': [],
-        'ASIAN_FRACTAL_Bearish': [],
-        'SWEEP_BullishSweep': [],
-        'SWEEP_BearishSweep': [],
-        'BOS_CONFIRMED_Buy': [],
-        'BOS_CONFIRMED_Sell': [],
-        'TRADE_ENTRY_Buy_Entry': [],
-        'TRADE_ENTRY_Sell_Entry': [],
-        'TRADE_ENTRY_Buy_SL': [],
-        'TRADE_ENTRY_Sell_SL': [],
-        'TRADE_ENTRY_Buy_TP': [],
-        'TRADE_ENTRY_Sell_TP': []
-    }
-    
-    # Стили для Asian Fractals (горизонтальные линии)
-    fractal_lines_bullish = []
-    fractal_lines_bearish = []
-
-    for index, row in df.iterrows():
-        event_time = row['Timestamp']
-        event_type = row['EventType']
-        price1 = row['Price1']
-        price2 = row['Price2']
-        trade_type_event = row['TradeType'] # 'Bullish', 'Bearish', 'Buy', 'Sell'
-
-        if pd.notna(price1):
-            if event_type == 'ASIAN_FRACTAL':
-                color = 'blue' if trade_type_event == 'Bullish' else 'red'
-                # Для горизонтальной линии фрактала нам нужна начальная и конечная точка по времени
-                # Попробуем сделать ее видимой на протяжении нескольких H1 баров или фиксированной длины
-                line_start_time = event_time
-                line_end_time = event_time + pd.Timedelta(hours=3) # Длина линии, например, 3 часа
-                
-                # Создаем DataFrame для линии фрактала
-                fractal_df = pd.DataFrame(
-                    data=[price1, price1], 
-                    index=[line_start_time, line_end_time], 
-                    columns=['value']
-                )
-                if trade_type_event == 'Bullish':
-                    fractal_lines_bullish.append(fractal_df)
-                else: # Bearish
-                    fractal_lines_bearish.append(fractal_df)
-
-            elif event_type == 'SWEEP':
-                marker_color = 'orange'
-                marker_style = 'o'
-                key = f"{event_type}_{trade_type_event}"
-                if key in event_markers:
-                     event_markers[key].append(price1)
-                else: # Если нет разделения по trade_type_event для SWEEP
-                     event_markers.setdefault('SWEEP_Generic', []).append(price1)
-                     
-            elif event_type == 'BOS_CONFIRMED':
-                marker_color = 'purple'
-                marker_style = '^' if trade_type_event == 'Buy' else 'v'
-                key = f"{event_type}_{trade_type_event}"
-                event_markers[key].append(price1)
-                
-            elif event_type == 'TRADE_ENTRY':
-                entry_price = price1
-                sl_price = price2 # SL сохранен в Price2
-                # TP нужно будет извлечь из Notes, если он там есть и нужен для отображения
-                # notes: $"TP: {tpResult.takeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}, Label: {label}"
-                
-                tp_price = None
-                try:
-                    notes_parts = row['Notes'].split(';')
-                    for part in notes_parts:
-                        if 'TP:' in part:
-                            tp_str = part.split(':')[1].strip()
-                            if tp_str != 'N/A':
-                                tp_price = float(tp_str)
-                            break
-                except:
-                    pass # Ошибка парсинга TP, оставляем None
-
-                if trade_type_event == 'Buy':
-                    event_markers['TRADE_ENTRY_Buy_Entry'].append(entry_price)
-                    if pd.notna(sl_price): event_markers['TRADE_ENTRY_Buy_SL'].append(sl_price)
-                    if pd.notna(tp_price): event_markers['TRADE_ENTRY_Buy_TP'].append(tp_price)
-                elif trade_type_event == 'Sell':
-                    event_markers['TRADE_ENTRY_Sell_Entry'].append(entry_price)
-                    if pd.notna(sl_price): event_markers['TRADE_ENTRY_Sell_SL'].append(sl_price)
-                    if pd.notna(tp_price): event_markers['TRADE_ENTRY_Sell_TP'].append(tp_price)
-        
-    # Подготовка данных для mpf.make_addplot
-    # Азиатские фракталы (линии)
-    if fractal_lines_bullish:
-        # Объединяем все бычьи фрактальные линии в один DataFrame, если их несколько
-        # Для mplfinance лучше передавать один DataFrame на addplot для линий
-        # или строить их отдельно через matplotlib Axes.
-        # Пока что, mplfinance не очень хорошо рисует много отдельных горизонтальных линий через addplot.
-        # Альтернатива - рисовать их как scatter точки, но это не линии.
-        # Попробуем собрать их в один series с NaN, где линии прерываются. Это сложно.
-        # Простой вариант: нарисуем их как scatter маркеры на уровне фрактала в момент его появления.
-        for f_df in fractal_lines_bullish:
-             ap_elements.append(mpf.make_addplot(f_df['value'], type='line', color='blue', width=0.7, alpha=0.7))
-    if fractal_lines_bearish:
-        for f_df in fractal_lines_bearish:
-             ap_elements.append(mpf.make_addplot(f_df['value'], type='line', color='red', width=0.7, alpha=0.7))
-
-
-    # События как scatter маркеры
-    # Убедимся, что все списки в event_markers имеют одинаковую длину с h1_bars_df.index
-    # или создадим Series с NaN, где нет событий.
-    
-    plot_styles = {
-        'ASIAN_FRACTAL_Bullish': {'type': 'scatter', 'color': 'blue', 'marker': '_', 'markersize': 100}, # Отобразим как маркеры пока
-        'ASIAN_FRACTAL_Bearish': {'type': 'scatter', 'color': 'red', 'marker': '_', 'markersize': 100}, # Отобразим как маркеры пока
-        'SWEEP_BullishSweep': {'type':'scatter', 'color':'yellow', 'marker':'o', 'markersize':50},
-        'SWEEP_BearishSweep': {'type':'scatter', 'color':'gold', 'marker':'o', 'markersize':50},
-        'SWEEP_Generic': {'type':'scatter', 'color':'orange', 'marker':'o', 'markersize':50},
-        'BOS_CONFIRMED_Buy': {'type':'scatter', 'color':'lime', 'marker':'^', 'markersize':100},
-        'BOS_CONFIRMED_Sell': {'type':'scatter', 'color':'magenta', 'marker':'v', 'markersize':100},
-        'TRADE_ENTRY_Buy_Entry': {'type':'scatter', 'color':'green', 'marker':'^', 'markersize':200},
-        'TRADE_ENTRY_Sell_Entry': {'type':'scatter', 'color':'maroon', 'marker':'v', 'markersize':200},
-        'TRADE_ENTRY_Buy_SL': {'type':'scatter', 'color':'gray', 'marker':'_', 'markersize':150},
-        'TRADE_ENTRY_Sell_SL': {'type':'scatter', 'color':'gray', 'marker':'_', 'markersize':150},
-        'TRADE_ENTRY_Buy_TP': {'type':'scatter', 'color':'darkcyan', 'marker':'_', 'markersize':150},
-        'TRADE_ENTRY_Sell_TP': {'type':'scatter', 'color':'darkcyan', 'marker':'_', 'markersize':150},
-    }
-
-    for key, prices_list in event_markers.items():
-        if prices_list: # Если есть события этого типа
-            style = plot_styles.get(key)
-            if style:
-                # Создаем Series для addplot, совмещенный с индексом h1_bars_df
-                event_series = pd.Series(index=h1_bars_df.index, dtype=float)
-                # Находим ближайшие H1 бары для времен событий и ставим маркеры там
-                # Это упрощение, т.к. события могут быть между H1 барами.
-                for price_val in prices_list: # предполагается, что prices_list это список цен, а не (время, цена)
-                                            # это неверно, нужно время события
-                    # Это место нужно переделать, так как event_markers хранит только цены.
-                    # Нам нужен исходный DataFrame df, чтобы сопоставить цены с временами событий.
-                    # Пройдемся по df еще раз для сбора данных для scatter
-                    pass # Заглушка, нужно переделать логику сбора данных для scatter
-
-    # Переделка сбора данных для scatter
-    scatter_data = {}
-    for key in plot_styles.keys():
-        scatter_data[key] = pd.Series(index=h1_bars_df.index, dtype=float)
-
-    for index, row in df.iterrows():
-        event_time = row['Timestamp']
-        event_type = row['EventType']
-        price1 = row['Price1']
-        price2 = row['Price2']
-        trade_type_event = row['TradeType']
-
-        # Найдем ближайший индекс в h1_bars_df для event_time
-        # Это нужно, чтобы маркеры отображались на графике H1
-        # Если h1_bars_df пустой, то h1_bars_df.index.get_indexer вернет ошибку или пустой массив
-        if h1_bars_df.empty:
+    candlestick_data = []
+    for _, row in h1_bars_df.iterrows():
+        try:
+            # Убедимся, что все значения OHLC являются числами
+            o = float(row['H1_Open'])
+            h = float(row['H1_High'])
+            l = float(row['H1_Low'])
+            c = float(row['H1_Close'])
+            time_val = int(row['Timestamp'].timestamp()) 
+            
+            candlestick_data.append({
+                "time": time_val,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c
+            })
+        except ValueError as ve:
+            print(f"Предупреждение: Пропуск строки из-за ошибки конвертации данных в число: {row}, ошибка: {ve}")
+            continue # Пропускаем эту строку, если данные не корректны
+        except Exception as ex:
+            print(f"Предупреждение: Пропуск строки из-за неизвестной ошибки: {row}, ошибка: {ex}")
             continue
-        
-        # Ищем ближайший существующий H1 бар по времени, не позднее времени события
-        target_h1_idx = h1_bars_df.index.get_indexer([event_time], method='ffill')[0]
-        # Если событие произошло до первого H1 бара, get_indexer вернет -1
-        if target_h1_idx == -1: 
-            # Попробуем взять следующий бар, если есть (method='bfill')
-            target_h1_idx = h1_bars_df.index.get_indexer([event_time], method='bfill')[0]
-            if target_h1_idx == -1: # Если все еще не нашли, пропускаем
-                 continue
-        
-        plot_idx_time = h1_bars_df.index[target_h1_idx]
 
+    if not candlestick_data:
+        print("Нет корректных данных H1_BAR для отображения после фильтрации и конвертации.")
+        return
 
-        if pd.notna(price1):
-            if event_type == 'ASIAN_FRACTAL':
-                key = f"{event_type}_{trade_type_event}"
-                if key in scatter_data: scatter_data[key].loc[plot_idx_time] = price1
-            elif event_type == 'SWEEP':
-                key_specific = f"{event_type}_{trade_type_event}"
-                key_generic = 'SWEEP_Generic'
-                if key_specific in scatter_data:
-                    scatter_data[key_specific].loc[plot_idx_time] = price1
-                elif key_generic in scatter_data : # Fallback
-                     scatter_data[key_generic].loc[plot_idx_time] = price1
-            elif event_type == 'BOS_CONFIRMED':
-                key = f"{event_type}_{trade_type_event}"
-                if key in scatter_data: scatter_data[key].loc[plot_idx_time] = price1
-            elif event_type == 'TRADE_ENTRY':
-                entry_price = price1
-                sl_price = price2
-                tp_price = None
-                try:
-                    notes_parts = row['Notes'].split(';')
-                    for part in notes_parts:
-                        if 'TP:' in part:
-                            tp_str = part.split(':')[1].strip()
-                            if tp_str != 'N/A': tp_price = float(tp_str)
-                            break
-                except: pass
+    candlestick_data = [dict(t) for t in {tuple(d.items()) for d in candlestick_data}]
+    candlestick_data.sort(key=lambda x: x['time'])
 
-                if trade_type_event == 'Buy':
-                    if 'TRADE_ENTRY_Buy_Entry' in scatter_data: scatter_data['TRADE_ENTRY_Buy_Entry'].loc[plot_idx_time] = entry_price
-                    if pd.notna(sl_price) and 'TRADE_ENTRY_Buy_SL' in scatter_data: scatter_data['TRADE_ENTRY_Buy_SL'].loc[plot_idx_time] = sl_price
-                    if pd.notna(tp_price) and 'TRADE_ENTRY_Buy_TP' in scatter_data: scatter_data['TRADE_ENTRY_Buy_TP'].loc[plot_idx_time] = tp_price
-                elif trade_type_event == 'Sell':
-                    if 'TRADE_ENTRY_Sell_Entry' in scatter_data: scatter_data['TRADE_ENTRY_Sell_Entry'].loc[plot_idx_time] = entry_price
-                    if pd.notna(sl_price) and 'TRADE_ENTRY_Sell_SL' in scatter_data: scatter_data['TRADE_ENTRY_Sell_SL'].loc[plot_idx_time] = sl_price
-                    if pd.notna(tp_price) and 'TRADE_ENTRY_Sell_TP' in scatter_data: scatter_data['TRADE_ENTRY_Sell_TP'].loc[plot_idx_time] = tp_price
+    print("Первые 5 элементов candlestick_data для проверки:")
+    for i, item in enumerate(candlestick_data[:5]):
+        print(f"  {i}: {item}")
+
+    markers_data = []
+    price_lines_data = []
+
+    candlestick_json = json.dumps(candlestick_data)
+    markers_json = json.dumps(markers_data)
+    price_lines_json = json.dumps(price_lines_data)
     
-    for key, series_to_plot in scatter_data.items():
-        if not series_to_plot.dropna().empty: # Если есть что рисовать
-            style = plot_styles.get(key)
-            if style:
-                 ap_elements.append(mpf.make_addplot(series_to_plot, **style))
+    chart_title = f'H3M Custom Chart for {csv_file_path.split("_")[-2]} on {pd.to_datetime(candlestick_data[0]["time"], unit="s").date() if candlestick_data else "N/A"}'
 
+    html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>{chart_title}</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body, html {{ margin: 0; padding: 0; height: 100%; }}
+        #chartContainer {{ width: 100%; height: 100%; }}
+    </style>
+</head>
+<body>
+    <div id="chartContainer"></div>
+    <script>
+        const chartContainer = document.getElementById('chartContainer');
+        const chart = LightweightCharts.createChart(chartContainer, {{
+            width: chartContainer.clientWidth,
+            height: chartContainer.clientHeight,
+            layout: {{
+                backgroundColor: '#ffffff',
+                textColor: 'rgba(33, 56, 77, 1)',
+            }},
+            grid: {{
+                vertLines: {{
+                    color: 'rgba(197, 203, 206, 0.5)',
+                }},
+                horzLines: {{
+                    color: 'rgba(197, 203, 206, 0.5)',
+                }},
+            }},
+            crosshair: {{
+                mode: LightweightCharts.CrosshairMode.Normal,
+            }},
+            priceScale: {{
+                borderColor: 'rgba(197, 203, 206, 0.8)',
+                precision: 5,
+                minMove: 0.00001
+            }},
+            timeScale: {{
+                borderColor: 'rgba(197, 203, 206, 0.8)',
+                timeVisible: true,
+                secondsVisible: false,
+                // Попробуем более явное форматирование для шкалы времени
+                tickMarkFormatter: (time, tickMarkType, locale) => {{
+                    const d = new Date(time * 1000); 
+                    // Для Daily/Weekly/Monthly можно показывать только дату
+                    // Для интрадей можно показывать HH:mm
+                    // LightweightCharts.TickMarkType.Year = 0, Month = 1, Day = 2, Time = 3, TimeWithSeconds = 4
+                    if (tickMarkType === LightweightCharts.TickMarkType.Time) {{
+                        return d.toLocaleTimeString(locale, {{ hour: '2-digit', minute: '2-digit' }});
+                    }}
+                    return d.toLocaleDateString(locale, {{ day: 'numeric', month: 'short' }});
+                }},
+            }},
+        }});
 
-    # Построение графика
+        const candleSeries = chart.addCandlestickSeries({{
+            upColor: 'rgba(34, 139, 34, 0.8)', 
+            downColor: 'rgba(255, 69, 0, 0.8)', 
+            borderDownColor: 'rgba(255, 69, 0, 1)',
+            borderUpColor: 'rgba(34, 139, 34, 1)',
+            wickDownColor: 'rgba(255, 69, 0, 1)',
+            wickUpColor: 'rgba(34, 139, 34, 1)',
+        }});
+
+        const candlestickData = {candlestick_json};
+        console.log("Candlestick data being passed to chart:", candlestickData.slice(0,5)); // Отладка в консоли браузера
+        candleSeries.setData(candlestickData);
+        
+        // const markersData = {markers_json};
+        // if (markersData.length > 0) {{
+        //     candleSeries.setMarkers(markersData);
+        // }}
+
+        // const priceLinesData = {price_lines_json};
+        // priceLinesData.forEach(line => {{
+        //     candleSeries.createPriceLine({{
+        //         price: line.price,
+        //         color: line.color || '#000000',
+        //         lineWidth: line.lineWidth || 1,
+        //         lineStyle: line.lineStyle || LightweightCharts.LineStyle.Solid,
+        //         axisLabelVisible: true,
+        //         title: line.title || '',
+        //     }});
+        // }});
+
+        window.addEventListener('resize', () => {{
+            chart.applyOptions({{ width: chartContainer.clientWidth, height: chartContainer.clientHeight }});
+        }});
+
+        chart.timeScale().fitContent();
+
+    </script>
+</body>
+</html>
+    """
+
     try:
-        mpf.plot(h1_bars_df, 
-                 type='candle', 
-                 style='yahoo', 
-                 title=f'H3M Custom Chart: {csv_file_path.split("_")[-2]}', # Используем символ из имени файла
-                 ylabel='Price',
-                 addplot=ap_elements if ap_elements else None, # Передаем None если список пуст
-                 volume=False, # Пока без объема
-                 figratio=(16,9),
-                 panel_ratios=(1, 0.3) if any(ap.get('panel',0) != 0 for ap in ap_elements if isinstance(ap,dict)) else (1,), # для разделения панелей, если нужно
-                 figsize=(15, 7)) # Размер графика
+        with open(output_html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        print(f"HTML график сохранен в: {os.path.abspath(output_html_path)}")
     except Exception as e:
-        print(f"Ошибка при построении графика: {e}")
-        print("Возможно, в данных H1 отсутствуют необходимые колонки 'Open', 'High', 'Low', 'Close' или они содержат NaN после конвертации.")
-        print("Содержимое h1_bars_df.head():")
-        print(h1_bars_df.head())
-        print("Содержимое h1_bars_df.info():")
-        h1_bars_df.info()
-
+        print(f"Ошибка при сохранении HTML файла: {e}")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Построение графика H1 свечей с событиями из CSV файла от H3M cBot.')
+    parser = argparse.ArgumentParser(description='Генерация интерактивного HTML графика H1 свечей с событиями из CSV файла от H3M cBot с использованием Lightweight Charts.')
     parser.add_argument('csv_file', type=str, help='Путь к CSV файлу с данными.')
+    parser.add_argument('--output', type=str, default='lightweight_chart.html', help='Имя выходного HTML файла (по умолчанию: lightweight_chart.html)')
     
     args = parser.parse_args()
-    plot_custom_chart(args.csv_file) 
+    generate_lightweight_chart_html(args.csv_file, args.output) 

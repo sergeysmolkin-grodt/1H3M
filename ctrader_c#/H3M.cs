@@ -75,6 +75,7 @@ namespace cAlgo.Robots
 
             try
             {
+                DebugLog($"[INITIAL_SYMBOL_INFO] Symbol: {SymbolName}, PipSize: {Symbol.PipSize}, TickSize: {Symbol.TickSize}, Digits: {Symbol.Digits}, MinStopLossDistance: {Symbol.MinStopLossDistance}, MinTakeProfitDistance: {Symbol.MinTakeProfitDistance}");
                 string robotName = GetType().Name;
                 string logsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "cAlgo", "Robots", "Logs", robotName);
                 Directory.CreateDirectory(logsDirectory);
@@ -345,13 +346,13 @@ namespace cAlgo.Robots
             {
                 // SL is below the Asian H1 fractal level
                 slPrice = Math.Round(fractal.Level - StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
-                slCalculationBasis = $"AsianFractal.Level ({fractal.Level}) - Buffer ({StopLossBufferPips} pips)";
+                slCalculationBasis = $"AsianFractal.Level ({fractal.Level:F5}) - Buffer ({StopLossBufferPips} pips)";
             }
             else // Sell
             {
                 // SL is above the Asian H1 fractal level
                 slPrice = Math.Round(fractal.Level + StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
-                slCalculationBasis = $"AsianFractal.Level ({fractal.Level}) + Buffer ({StopLossBufferPips} pips)";
+                slCalculationBasis = $"AsianFractal.Level ({fractal.Level:F5}) + Buffer ({StopLossBufferPips} pips)";
             }
             DebugLog($"[DEBUG_SL_CALC] EntryPrice for SL calc: {entryPrice:F5}, AsianFractal Level: {fractal.Level:F5}, SL Buffer: {StopLossBufferPips}, Calculated SL Price: {slPrice:F5}");
             
@@ -381,14 +382,43 @@ namespace cAlgo.Robots
             }
 
             var label = $"H3M_{tradeType}_{Server.Time.ToShortTimeString()}";
-            var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, label, slPrice, tpResult.takeProfitPrice);
+            
+            // НОВЫЙ ЛОГ ПЕРЕД ИСПОЛНЕНИЕМ
+            DebugLog($"[PRE_EXECUTE_ORDER] Attempting to execute market order. Symbol: {SymbolName}, Type: {tradeType}, Size: {positionSize}, Label: {label}, SL: {slPrice:F5}, TP: {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"}");
+
+            // ВРЕМЕННО ДЛЯ ДИАГНОСТИКИ: Вызываем без SL/TP
+            var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, label, null, null);
+            // var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, label, slPrice, tpResult.takeProfitPrice); // ОРИГИНАЛЬНЫЙ ВЫЗОВ
 
             if (result.IsSuccessful)
             {
                 fractal.EntryDone = true;
                 _lastTradeDate = Server.Time.Date;
-                DebugLog($"[TRADE_OPEN] {tradeType} order successful. Price: {result.Position.EntryPrice}, SL: {slPrice} (Basis: {slCalculationBasis}), TP: {tpResult.takeProfitPrice} (RR: {tpResult.rr}). Size: {positionSize}");
-                LogChartEvent(result.Position.EntryTime, "TRADE_ENTRY", price1: result.Position.EntryPrice, price2: slPrice, tradeType: tradeType.ToString(), notes: $"TP: {tpResult.takeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}, Label: {label}");
+                var position = result.Position;
+
+                DebugLog($"[TRADE_OPEN_ACTUAL_PRE_MODIFY] {tradeType} order successful. Price: {position.EntryPrice:F5}, Initial SL: {position.StopLoss?.ToString("F5") ?? "N/A"}, Initial TP: {position.TakeProfit?.ToString("F5") ?? "N/A"}. Attempting to modify SL to {slPrice:F5} and TP to {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"}.");
+
+                // Modify Stop Loss and Take Profit asynchronously
+                if (position.StopLoss != slPrice)
+                {
+                    ModifyPositionAsync(position, slPrice, position.TakeProfit);
+                }
+                if (position.TakeProfit != tpResult.takeProfitPrice)
+                {
+                    ModifyPositionAsync(position, position.StopLoss, tpResult.takeProfitPrice);
+                }
+                // Поскольку это асинхронный вызов, мы не будем здесь ждать его завершения в OnTick,
+                // но для целей отладки мы могли бы добавить обработку завершения (не в этом шаге).
+
+                // Лог TRADE_OPEN_ACTUAL будет теперь отражать состояние SL/TP *после* попытки модификации,
+                // но это произойдет на следующем тике, когда позиция обновится.
+                // Для более точного лога моментальной установки, мы бы использовали .Result или await,
+                // но это может заблокировать OnTick, что нежелательно.
+                // Поэтому, пока оставим как есть и посмотрим на логи следующего тика или на итоговое состояние сделки.
+
+                DebugLog($"[TRADE_OPEN_ACTUAL_POST_MODIFY] {tradeType} order successful. Price: {position.EntryPrice:F5}, SL sent for modification: {slPrice:F5}, TP sent for modification: {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"}. Intended SL (Original Calc): {slPrice:F5} (Basis: {slCalculationBasis}), Intended TP (Original Calc): {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"} (RR: {tpResult.rr}). Size: {positionSize}");
+
+                LogChartEvent(position.EntryTime, "TRADE_ENTRY", price1: position.EntryPrice, price2: slPrice, tradeType: tradeType.ToString(), notes: $"Intended TP: {tpResult.takeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}, Label: {label}, Modified SL: {slPrice.ToString(CultureInfo.InvariantCulture)}, Modified TP: {tpResult.takeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}");
             }
             else
             {
@@ -530,17 +560,17 @@ namespace cAlgo.Robots
             // Принятие решения о тренде
             if ((bullish > bearish + 5) || (hasHigherHighs && hasHigherLows) || strongBullishImpulse)
             {
-                DebugLog($"[DEBUG] Определен БЫЧИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, HH={hasHigherHighs}, HL={hasHigherLows}, импульс={recentMovement/Symbol.PipSize:F1} пипсов");
+                // DebugLog($"[DEBUG] Определен БЫЧИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, HH={hasHigherHighs}, HL={hasHigherLows}, импульс={recentMovement/Symbol.PipSize:F1} пипсов");
                 return TrendContext.Bullish;
             }
             
             if ((bearish > bullish + 5) || (hasLowerLows && hasLowerHighs) || strongBearishImpulse)
             {
-                DebugLog($"[DEBUG] Определен МЕДВЕЖИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, LL={hasLowerLows}, LH={hasLowerHighs}, импульс={recentMovement/Symbol.PipSize:F1} пипсов");
+                // DebugLog($"[DEBUG] Определен МЕДВЕЖИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, LL={hasLowerLows}, LH={hasLowerHighs}, импульс={recentMovement/Symbol.PipSize:F1} пипсов");
                 return TrendContext.Bearish;
             }
             
-            DebugLog($"[DEBUG] Определен НЕЙТРАЛЬНЫЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, движение={recentMovement/Symbol.PipSize:F1} пипсов");
+            // DebugLog($"[DEBUG] Определен НЕЙТРАЛЬНЫЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, движение={recentMovement/Symbol.PipSize:F1} пипсов");
             return TrendContext.Neutral;
         }
 
@@ -627,9 +657,6 @@ namespace cAlgo.Robots
                 }
             }
             
-
-
-
             // Проверяем последние 3 бара на импульс
             bool recentBullishMomentum = true;
             bool recentBearishMomentum = true;
@@ -693,7 +720,7 @@ namespace cAlgo.Robots
             var time = Server.Time; // Current server time for context
 
             // Special handling for the target debugging date
-            if (time.Date == new DateTime(2025, 5, 14))
+            if (time.Date == new DateTime(2025, 5, 14)) // MODIFIED: Reverted date for detailed logging
             {
                 // For the target date, print messages that have any of our key debug tags
                 // or are specifically marked for this date.
@@ -709,7 +736,7 @@ namespace cAlgo.Robots
                     message.Contains("[SL_ADJUST]") ||
                     message.Contains("[DEBUG_OHLC_M3]") || // Specific M3 OHLC logging for 06:03, 06:15
                     message.Contains("[DEBUG_OHLC_BAR_SPECIFIC_FOR_BOS_CHECK]") || // Specific OHLC from Is3mStructureBreak
-                    message.Contains("[USER_TARGET_LOG 14.05.2025]") || // User's explicit tag
+                    message.Contains("[USER_TARGET_LOG 14.05.2025]") || // MODIFIED: Reverted date in user tag
                     message.Contains("Азиатский фрактал") || // Fractal finding logs
                     message.Contains("Найден") || // Fractal finding logs
                     message.Contains("Нет очевидного тренда") ||
@@ -718,7 +745,11 @@ namespace cAlgo.Robots
                     message.Contains("Текущий тренд") ||
                     message.Contains("Уже была сделка сегодня") ||
                     message.Contains("Поиск фракталов") ||
-                    message.Contains("Проверка свипа фракталов");
+                    message.Contains("Проверка свипа фракталов") ||
+                    message.Contains("[PRE_EXECUTE_ORDER]") ||
+                    message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") || // Новый лог
+                    message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") || // Новый лог
+                    message.Contains("[INITIAL_SYMBOL_INFO]");
 
                 if (shouldPrintOnTargetDate)
                 {
@@ -728,7 +759,7 @@ namespace cAlgo.Robots
             }
 
             // Default behavior for other dates: suppress logs unless a global debug flag is enabled (not implemented here)
-            // For now, this means logs will only appear for 2025-05-14 based on the logic above.
+            // For now, this means logs will only appear for 2025-05-20 based on the logic above.
         }
 
         protected override void OnTick()
@@ -764,15 +795,15 @@ namespace cAlgo.Robots
                 DebugLog($"[DEBUG] Нет очевидного тренда, день пропускается");
                 return;
             }
-            DebugLog($"[DEBUG] ======= НОВЫЙ ТИК ======= {Server.Time} =======");
-            DebugLog($"[DEBUG] Текущий тренд: {trendContext}, цена = {currentPrice:F5}, время = {Server.Time}");
+            // DebugLog($"[DEBUG] ======= НОВЫЙ ТИК ======= {Server.Time} =======");
+            // DebugLog($"[DEBUG] Текущий тренд: {trendContext}, цена = {currentPrice:F5}, время = {Server.Time}");
             
 
-            DebugLog($"[DEBUG] Настройки: MinRR={_minRR:F2}, MaxRR={_maxRR:F2}");
+            // DebugLog($"[DEBUG] Настройки: MinRR={_minRR:F2}, MaxRR={_maxRR:F2}");
             
             if (_lastTradeDate.Date == Server.Time.Date)
             {
-                DebugLog($"[DEBUG] Уже была сделка сегодня, день пропускается");
+                // DebugLog($"[DEBUG] Уже была сделка сегодня, день пропускается");
                 return;
             }
             
@@ -781,11 +812,11 @@ namespace cAlgo.Robots
 
             if (_asianFractals.Count == 0 || (newH1BarJustLogged && Server.Time.Date != _asianFractals.FirstOrDefault()?.Time.Date))
             {
-                DebugLog($"[DEBUG] Поиск фракталов в азиатскую сессию для тренда: {trendContext}...");
+                // DebugLog($"[DEBUG] Поиск фракталов в азиатскую сессию для тренда: {trendContext}...");
                 FindAsianSessionFractals(trendContext);
             }
             
-            DebugLog($"[DEBUG] Проверка свипа фракталов для тренда: {trendContext}...");
+            // DebugLog($"[DEBUG] Проверка свипа фракталов для тренда: {trendContext}...");
             CheckFractalsSweep(trendContext);
             
             foreach (var fractal in _asianFractals.Where(f => f.IsSwept && !f.EntryDone && f.BosLevel.HasValue).ToList())
@@ -837,7 +868,7 @@ namespace cAlgo.Robots
                 }
             }
             
-            DebugLog($"[DEBUG] ======= КОНЕЦ ТИКА ======= {Server.Time} =======");
+            // DebugLog($"[DEBUG] ======= КОНЕЦ ТИКА ======= {Server.Time} =======");
         }
 
         protected override void OnStop()
@@ -917,7 +948,7 @@ namespace cAlgo.Robots
                 _asianFractals = _asianFractals.OrderByDescending(f => f.Level).ToList();
             }
 
-            if (today == new DateTime(2025, 5, 14)) // Логируем только для целевой даты
+            if (today == new DateTime(2025, 5, 14)) // MODIFIED: Reverted date for fractal logging
             {
                 foreach (var f in _asianFractals)
                 {

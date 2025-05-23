@@ -188,127 +188,130 @@ namespace cAlgo.Robots
         }
 
         // --- Find nearest H1 fractal for take profit ---
-        private double? FindNearestH1FractalForTP(TradeType tradeType, double entryPrice)
+        private List<double> FindAllH1FractalsForTP(TradeType tradeType, double entryPrice)
         {
-            double? nearestLevel = null;
-            double minDistance = double.MaxValue;
+            var h1Fractals = new List<double>();
             var h1Bars = _h1Bars;
-            var hourlyFractals = Indicators.Fractals(h1Bars, FractalPeriod);
-            
-            for (int i = FractalPeriod; i < h1Bars.Count - FractalPeriod; i++)
-            {
-                if (tradeType == TradeType.Buy && !double.IsNaN(hourlyFractals.UpFractal[i]))
-                {
-                    var level = hourlyFractals.UpFractal[i];
-                    DebugLog($"[TP_FIND_NEAREST_RAW_UP] i={i}, Raw H1 UpFractal: {level:F5} at {h1Bars.OpenTimes[i]}, Entry: {entryPrice:F5}"); 
-                    var distance = level - entryPrice;
-                    if (distance > 0 && distance < minDistance)
-                    {
-                        minDistance = distance;
-                        nearestLevel = level;
-                        DebugLog($"[TP_FIND_NEAREST_CANDIDATE_UP] Found NEW nearest H1 UpFractal: {nearestLevel:F5} at {h1Bars.OpenTimes[i]}");
-                    }
-                }
-                if (tradeType == TradeType.Sell && !double.IsNaN(hourlyFractals.DownFractal[i]))
-                {
-                    var level = hourlyFractals.DownFractal[i];
-                    DebugLog($"[TP_FIND_NEAREST_RAW_DOWN] i={i}, Raw H1 DownFractal: {level:F5} at {h1Bars.OpenTimes[i]}, Entry: {entryPrice:F5}");
-                    var distance = entryPrice - level;
-                    if (distance > 0 && distance < minDistance)
-                    {
-                        minDistance = distance;
-                        nearestLevel = level;
-                        DebugLog($"[TP_FIND_NEAREST_CANDIDATE_DOWN] Found NEW nearest H1 DownFractal: {nearestLevel:F5} at {h1Bars.OpenTimes[i]}");
-                    }
-                }
-            }
-            return nearestLevel;
-        }
+            var hourlyFractalsIndicator = Indicators.Fractals(h1Bars, FractalPeriod); // Renamed to avoid conflict
 
-        // --- Find next H1 frкactal after the nearest one ---
-        private double? TryFindNextH1Fractal(TradeType tradeType, double entryPrice, double firstFractalLevel)
-        {
-            double? nextLevel = null;
-            double minDistance = double.MaxValue;
-            var h1Bars = _h1Bars;
-            var hourlyFractals = Indicators.Fractals(h1Bars, FractalPeriod);
-            
+            DebugLog($"[TP_DEBUG_ALL_RAW_FRACTALS] --- Verifying: All Raw H1 UpFractals (Before Filter/Sort) for Entry: {entryPrice:F5} ---");
             for (int i = FractalPeriod; i < h1Bars.Count - FractalPeriod; i++)
             {
-                if (tradeType == TradeType.Buy && !double.IsNaN(hourlyFractals.UpFractal[i]))
+                if (!double.IsNaN(hourlyFractalsIndicator.UpFractal[i]))
                 {
-                    var level = hourlyFractals.UpFractal[i];
-                    DebugLog($"[TP_FIND_NEXT_RAW_UP] i={i}, Raw H1 UpFractal: {level:F5} at {h1Bars.OpenTimes[i]}, Entry: {entryPrice:F5}, FirstTP: {firstFractalLevel:F5}");
-                    var distance = level - entryPrice;
-                    if (distance > 0 && level > firstFractalLevel && distance < minDistance) 
-                    {
-                        minDistance = distance;
-                        nextLevel = level;
-                        DebugLog($"[TP_FIND_NEXT_CANDIDATE_UP] Found NEW next H1 UpFractal: {nextLevel:F5} at {h1Bars.OpenTimes[i]}");
-                    }
+                     DebugLog($"[TP_DEBUG_ALL_RAW_FRACTALS] Index {i}: Raw H1 UpFractal: {hourlyFractalsIndicator.UpFractal[i]:F5} at {h1Bars.OpenTimes[i]}");
                 }
-                if (tradeType == TradeType.Sell && !double.IsNaN(hourlyFractals.DownFractal[i]))
+                if (tradeType == TradeType.Buy && !double.IsNaN(hourlyFractalsIndicator.UpFractal[i]))
                 {
-                    var level = hourlyFractals.DownFractal[i];
-                    DebugLog($"[TP_FIND_NEXT_RAW_DOWN] i={i}, Raw H1 DownFractal: {level:F5} at {h1Bars.OpenTimes[i]}, Entry: {entryPrice:F5}, FirstTP: {firstFractalLevel:F5}");
-                    var distance = entryPrice - level;
-                    if (distance > 0 && level < firstFractalLevel && distance < minDistance) 
+                    var level = hourlyFractalsIndicator.UpFractal[i];
+                    if (level > entryPrice) // Only consider fractals above entry for buy
                     {
-                        minDistance = distance;
-                        nextLevel = level;
-                        DebugLog($"[TP_FIND_NEXT_CANDIDATE_DOWN] Found NEW next H1 DownFractal: {nextLevel:F5} at {h1Bars.OpenTimes[i]}");
+                        h1Fractals.Add(level);
+                        DebugLog($"[TP_DEBUG_ALL_RAW_FRACTALS] Found {level:F5} at {h1Bars.OpenTimes[i]}");
                     }
                 }
             }
-            return nextLevel;
+
+            DebugLog($"[TP_DEBUG_ALL_RAW_FRACTALS] --- All Raw H1 DownFractals (Before Filter/Sort) for Entry: {entryPrice:F5} ---");
+            for (int i = FractalPeriod; i < h1Bars.Count - FractalPeriod; i++)
+            {
+                if (!double.IsNaN(hourlyFractalsIndicator.DownFractal[i]))
+                {
+                    DebugLog($"[TP_DEBUG_ALL_RAW_FRACTALS] Index {i}: Raw H1 DownFractal: {hourlyFractalsIndicator.DownFractal[i]:F5} at {h1Bars.OpenTimes[i]}");
+                }
+                if (tradeType == TradeType.Sell && !double.IsNaN(hourlyFractalsIndicator.DownFractal[i]))
+                {
+                    var level = hourlyFractalsIndicator.DownFractal[i];
+                    if (level < entryPrice) // Only consider fractals below entry for sell
+                    {
+                        h1Fractals.Add(level);
+                        DebugLog($"[TP_DEBUG_ALL_RAW_FRACTALS] Found {level:F5} at {h1Bars.OpenTimes[i]}");
+                    }
+                }
+            }
+
+            // Sort fractals by distance from entry price (nearest first)
+            if (tradeType == TradeType.Buy)
+            {
+                h1Fractals.Sort((a, b) => (a - entryPrice).CompareTo(b - entryPrice));
+            }
+            else // Sell
+            {
+                h1Fractals.Sort((a, b) => (entryPrice - a).CompareTo(entryPrice - b));
+            }
+            
+            if(h1Fractals.Count > 0)
+            {
+                DebugLog($"[TP_DEBUG_SORTED_LIST] Found {h1Fractals.Count} fractals. Nearest is {h1Fractals[0]:F5}");
+            } else {
+                DebugLog($"[TP_DEBUG_SORTED_LIST] No suitable H1 fractals found by FindAllH1FractalsForTP.");
+            }
+
+            return h1Fractals;
         }
 
         private (double? takeProfitPrice, double rr) CalculateTakeProfit(TradeType tradeType, double entryPrice, double stopLossPrice)
         {
             DebugLog($"[TP_DEBUG] CalculateTakeProfit called. TradeType: {tradeType}, Entry: {entryPrice:F5}, SL: {stopLossPrice:F5}");
             var stopLossDistance = Math.Abs(entryPrice - stopLossPrice);
-            if (stopLossDistance == 0) 
+            if (stopLossDistance == 0)
             {
                 DebugLog("[TP_DEBUG] CalculateTakeProfit: Stop Loss distance is 0. Cannot calculate RR.");
                 return (null, 0);
             }
             DebugLog($"[TP_DEBUG] Stop Loss Distance (Pips): {stopLossDistance/Symbol.PipSize:F1}");
 
-            double? candidateTp = FindNearestH1FractalForTP(tradeType, entryPrice);
-            int attempts = 0;
-            const int maxAttempts = 10; // Prevent infinite loops, look for at most 10 fractals
-            double lastConsideredRr = 0;
-
-            while (candidateTp.HasValue && attempts < maxAttempts)
+            List<double> allCandidateTps = FindAllH1FractalsForTP(tradeType, entryPrice);
+            
+            // Log the entire sorted list of candidate TPs
+            if (allCandidateTps.Count > 0)
             {
-                attempts++;
-                DebugLog($"[TP_DEBUG] Attempt {attempts}: Evaluating TP Candidate ({candidateTp.Value:F5})");
-                double currentRr = Math.Abs(candidateTp.Value - entryPrice) / stopLossDistance;
-                lastConsideredRr = currentRr; // Store for final reject log
-                DebugLog($"[TP_DEBUG] RR for Candidate ({candidateTp.Value:F5}): {currentRr:F2}");
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                sb.Append("[TP_DEBUG_SORTED_LIST_FULL] Sorted Candidate TPs: ");
+                foreach (var tp_val in allCandidateTps)
+                {
+                    sb.AppendFormat("{0:F5}; ", tp_val);
+                }
+                DebugLog(sb.ToString());
+            }
+            else
+            {
+                DebugLog("[TP_DEBUG_SORTED_LIST_FULL] No candidate TPs found after sorting/filtering.");
+            }
+
+            if (allCandidateTps.Count == 0)
+            {
+                DebugLog($"[TP_DEBUG] No H1 fractals found by FindAllH1FractalsForTP.");
+                return (null, 0);
+            }
+
+            DebugLog($"[TP_DEBUG] Found {allCandidateTps.Count} H1 fractals to check.");
+
+            foreach (var candidateTp in allCandidateTps)
+            {
+                DebugLog($"[TP_DEBUG] Evaluating TP Candidate ({candidateTp:F5})");
+                double currentRr = Math.Abs(candidateTp - entryPrice) / stopLossDistance;
+                DebugLog($"[TP_DEBUG] RR for Candidate ({candidateTp:F5}): {currentRr:F2}");
 
                 if (currentRr >= _minRR && currentRr <= _maxRR)
                 {
-                    DebugLog($"[TP_DEBUG] SUITABLE TP found: {candidateTp.Value:F5} with RR {currentRr:F2}. Using it.");
-                    return (candidateTp.Value, currentRr);
+                    DebugLog($"[TP_DEBUG] SUITABLE TP found: {candidateTp:F5} with RR {currentRr:F2}. Using it as it's the first suitable in sorted list.");
+                    return (candidateTp, currentRr); // Используем первый подходящий
                 }
-                
-                DebugLog($"[TP_DEBUG] TP Candidate {candidateTp.Value:F5} (RR {currentRr:F2}) is NOT SUITABLE (Range: {_minRR:F2}-{_maxRR:F2}). Searching for next.");
-                candidateTp = TryFindNextH1Fractal(tradeType, entryPrice, candidateTp.Value); 
-            }
-
-            if (attempts == maxAttempts && candidateTp.HasValue) 
-            {
-                DebugLog($"[TP_DEBUG] Max attempts ({maxAttempts}) reached trying to find suitable TP. Last candidate {candidateTp.Value:F5} (RR {lastConsideredRr:F2}) was not suitable.");
-            } else if (!candidateTp.HasValue && attempts > 0) 
-            {
-                 DebugLog($"[TP_DEBUG] No more H1 fractals found to check after {attempts} attempts. Last RR considered: {lastConsideredRr:F2}.");
-            } else if (attempts == 0 && !candidateTp.HasValue) {
-                 DebugLog($"[TP_DEBUG] No H1 fractals found at all by FindNearestH1FractalForTP.");
+                DebugLog($"[TP_DEBUG] TP Candidate {candidateTp:F5} (RR {currentRr:F2}) is NOT SUITABLE (Range: {_minRR:F2}-{_maxRR:F2}). Checking next.");
             }
             
-            DebugLog($"[TP_DEBUG] No suitable H1 fractal TP found that meets RR criteria.");
-            return (null, lastConsideredRr); // Return last RR for more informative reject log in EnterPosition
+            DebugLog($"[TP_DEBUG] No suitable H1 fractal TP found that meets RR criteria after checking all {allCandidateTps.Count} fractals.");
+            // Return the RR of the last checked (furthest valid direction) fractal if any were checked, otherwise 0.
+            double lastConsideredRr = 0;
+            if (allCandidateTps.Count > 0)
+            {
+                // As fractals are sorted by distance, the last one might not be the "last considered" in terms of loop,
+                // but it's the furthest valid one. For logging, let's use the RR of the closest one if none matched.
+                 lastConsideredRr = Math.Abs(allCandidateTps[0] - entryPrice) / stopLossDistance;
+                 DebugLog($"[TP_DEBUG] Closest fractal {allCandidateTps[0]:F5} had RR {lastConsideredRr:F2}, but was not suitable or no fractals were suitable.");
+            }
+            return (null, lastConsideredRr); 
         }
 
         private double CalculateStopLoss(TradeType tradeType, double asianFractalLevelToPlaceSLBehind)
@@ -725,7 +728,10 @@ namespace cAlgo.Robots
                     message.Contains("[DEBUG]") || // General debug prefix
                     message.Contains("[SWEEP_") || // Covers [SWEEP_BULL], [SWEEP_BEAR]
                     message.Contains("[BOS_") ||   // Covers [BOS_DEBUG_...], [BOS_SUCCESS_...], [BOS_REJECT_...]
-                    message.Contains("[TP_DEBUG]") ||
+                    message.Contains("[TP_DEBUG]") || // Main TP debug tag
+                    message.Contains("[TP_DEBUG_ALL_RAW_FRACTALS]") || // Specific tag for raw fractals
+                    message.Contains("[TP_DEBUG_SORTED_LIST]") || // Specific tag for sorted list
+                    message.Contains("[TP_DEBUG_SORTED_LIST_FULL]") || // Ensure this tag is also included for printing
                     message.Contains("[TP_REJECT]") ||
                     message.Contains("[TRADE_") || // Covers [TRADE_OPEN], [TRADE_FAIL]
                     message.Contains("[ERROR_") || // Covers [ERROR_ENTRY]
@@ -1202,3 +1208,4 @@ namespace cAlgo.Robots
         Bearish
     }
 } 
+    

@@ -398,15 +398,12 @@ namespace cAlgo.Robots
 
                 DebugLog($"[TRADE_OPEN_ACTUAL_PRE_MODIFY] {tradeType} order successful. Price: {position.EntryPrice:F5}, Initial SL: {position.StopLoss?.ToString("F5") ?? "N/A"}, Initial TP: {position.TakeProfit?.ToString("F5") ?? "N/A"}. Attempting to modify SL to {slPrice:F5} and TP to {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"}.");
 
-                // Modify Stop Loss and Take Profit asynchronously
-                if (position.StopLoss != slPrice)
+                // Modify Stop Loss and Take Profit asynchronously in a single call
+                if (position.StopLoss != slPrice || position.TakeProfit != tpResult.takeProfitPrice)
                 {
-                    ModifyPositionAsync(position, slPrice, position.TakeProfit);
+                    ModifyPositionAsync(position, slPrice, tpResult.takeProfitPrice);
                 }
-                if (position.TakeProfit != tpResult.takeProfitPrice)
-                {
-                    ModifyPositionAsync(position, position.StopLoss, tpResult.takeProfitPrice);
-                }
+
                 // Поскольку это асинхронный вызов, мы не будем здесь ждать его завершения в OnTick,
                 // но для целей отладки мы могли бы добавить обработку завершения (не в этом шаге).
 

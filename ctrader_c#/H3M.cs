@@ -41,6 +41,8 @@ namespace cAlgo.Robots
         [Parameter("Manual Trend Mode", DefaultValue = ManualTrendMode.Auto)]
         public ManualTrendMode TrendMode { get; set; }
 
+        private const double _fixedRiskPercent = 1.0; // Fixed risk at 1%
+
         private const double _minRR = 1.3;
         private const double _maxRR = 5.0;
 
@@ -167,7 +169,7 @@ namespace cAlgo.Robots
         private double CalculatePositionSize(double stopLossPips)
         {
             var accountBalance = Account.Balance;
-            var riskAmount = accountBalance * (RiskPercent / 100.0);
+            var riskAmount = accountBalance * (_fixedRiskPercent / 100.0);
             var pipValue = Symbol.PipValue;
             var stopLossAmount = stopLossPips * pipValue;
             

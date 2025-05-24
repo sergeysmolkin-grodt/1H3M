@@ -68,6 +68,8 @@ namespace cAlgo.Robots
         private DateTime _debugSpecificTimestamp = DateTime.MinValue;
         private HashSet<DateTime> _loggedOHLCBarsForTargetDate = new HashSet<DateTime>();
 
+        private string _lastTrendContextLogMessage = null; // For storing the last trend context message determined by DebugLog
+
         private StreamWriter _chartDataWriter;
         private string _csvFilePath;
         private static readonly string CSV_HEADER = "Timestamp;EventType;H1_Open;H1_High;H1_Low;H1_Close;Price1;Price2;TradeType;Notes";
@@ -454,7 +456,7 @@ namespace cAlgo.Robots
         private void CheckAsianSession()
         {
             var currentTime = Server.Time;
-            if (currentTime.Date != _lastAsianSessionCheck.Date)
+            if (currentTime.Date != _lastAsianSessionCheck)
             {
                 _isAsianSession = IsAsianSession();
                 _lastAsianSessionCheck = currentTime;
@@ -530,7 +532,6 @@ namespace cAlgo.Robots
             }
             
             // --- Impulse Logic ---
-            // Requires at least 6 bars (indices 0-5, so last=5, last-5=0) for its fixed 5-bar lookback.
             bool strongBullishImpulse = false;
             bool strongBearishImpulse = false;
             double recentMovement = 0;
@@ -542,53 +543,27 @@ namespace cAlgo.Robots
                 strongBearishImpulse = recentMovement < -Symbol.PipSize * 40;
             }
             
-            // --- Structure Analysis Logic (HH/HL, LL/LH) ---
-            // Requires at least 11 bars for its fixed 10-bar lookback (indices 0-10, so last=10, last-10=0).
-            bool hasHigherHighs = false;
-            bool hasHigherLows = false;
-            bool hasLowerLows = false;
-            bool hasLowerHighs = false;
+            // --- Structure Analysis Logic (HH/HL, LL/LH) --- REMOVED
+            // bool hasHigherHighs = false;
+            // bool hasHigherLows = false;
+            // bool hasLowerLows = false;
+            // bool hasLowerHighs = false;
 
-            if (_h1Bars.Count >= 11)
-            {
-                double prevHigh = _h1Bars.HighPrices[last - 10];
-                double prevLow = _h1Bars.LowPrices[last - 10];
-                
-                for (int i = 9; i >= 0; i--) 
-                {
-                    if (_h1Bars.HighPrices[last - i] > prevHigh)
-                    {
-                        hasHigherHighs = true;
-                    }
-                    else if (_h1Bars.HighPrices[last - i] < prevHigh)
-                    {
-                        hasLowerHighs = true;
-                    }
-                    
-                    if (_h1Bars.LowPrices[last - i] > prevLow)
-                    {
-                        hasHigherLows = true;
-                    }
-                    else if (_h1Bars.LowPrices[last - i] < prevLow)
-                    {
-                        hasLowerLows = true;
-                    }
-                    
-                    prevHigh = _h1Bars.HighPrices[last - i];
-                    prevLow = _h1Bars.LowPrices[last - i];
-                }
-            }
+            // if (_h1Bars.Count >= 11)
+            // {
+            //     // ... structure analysis code was here ...
+            // }
             
-            // Принятие решения о тренде using TrendCandleThreshold
-            if ((bullish > bearish + TrendCandleThreshold) || (hasHigherHighs && hasHigherLows) || strongBullishImpulse) 
+            // Принятие решения о тренде using TrendCandleThreshold and Impulse
+            if ((bullish > bearish + TrendCandleThreshold) || strongBullishImpulse) 
             {
-                DebugLog($"[DEBUG] Определен БЫЧИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, HH={hasHigherHighs}, HL={hasHigherLows}, импульс={recentMovement/Symbol.PipSize:F1} пипсов");
+                DebugLog($"[DEBUG] Определен БЫЧИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, импульс={recentMovement/Symbol.PipSize:F1} пипсов"); // Removed HH, HL from log
                 return TrendContext.Bullish;
             }
             
-            if ((bearish > bullish + TrendCandleThreshold) || (hasLowerLows && hasLowerHighs) || strongBearishImpulse) 
+            if ((bearish > bullish + TrendCandleThreshold) || strongBearishImpulse) 
             {
-                DebugLog($"[DEBUG] Определен МЕДВЕЖИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, LL={hasLowerLows}, LH={hasLowerHighs}, импульс={recentMovement/Symbol.PipSize:F1} пипсов");
+                DebugLog($"[DEBUG] Определен МЕДВЕЖИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, импульс={recentMovement/Symbol.PipSize:F1} пипсов"); // Removed LL, LH from log
                 return TrendContext.Bearish;
             }
             
@@ -741,15 +716,39 @@ namespace cAlgo.Robots
         {
             // Выводить в консоль только сообщения, касающиеся определения контекста тренда,
             // параметров исполняемой сделки или ошибки исполнения сделки.
-            if (message.Contains("[DEBUG] Определен") ||      // Сообщения об определении контекста тренда
-                message.Contains("[PRE_EXECUTE_ORDER]") ||        // Попытка исполнить сделку с её параметрами
-                message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") || // Детали успешно открытой сделки до модификации SL/TP
-                message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") || // Детали успешно открытой сделки после модификации SL/TP
-                message.Contains("[TRADE_FAIL]"))                 // Сообщение о неудачной попытке открыть сделку
-            {
-                Print(message); // Выводим сообщение в лог cTrader
-            }
+            // if (message.Contains("[DEBUG] Определен") ||      // Сообщения об определении контекста тренда
+            //     message.Contains("[PRE_EXECUTE_ORDER]") ||        // Попытка исполнить сделку с её параметрами
+            //     message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") || // Детали успешно открытой сделки до модификации SL/TP
+            //     message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") || // Детали успешно открытой сделки после модификации SL/TP
+            //     message.Contains("[TRADE_FAIL]"))                 // Сообщение о неудачной попытке открыть сделку
+            // {
+            //     Print(message); // Выводим сообщение в лог cTrader
+            // }
             // Все остальные вызовы DebugLog с другими сообщениями будут проигнорированы (не будут выведены в консоль).
+
+            // Check if it's a trend context message
+            bool isTrendContextMessage = message.Contains("[DEBUG] Определен") ||
+                                         message.Contains("[DEBUG] Очевидный бычий тренд") ||
+                                         message.Contains("[DEBUG] Очевидный медвежий тренд") ||
+                                         message.Contains("[DEBUG] Бычий контекст:") ||
+                                         message.Contains("[DEBUG] Медвежий контекст:") ||
+                                         message.Contains("[DEBUG] Bullish Context:") ||
+                                         message.Contains("[DEBUG] Bearish Context:") ||
+                                         message.Contains("[DEBUG] No Clear Trend Context");
+
+            if (isTrendContextMessage)
+            {
+                _lastTrendContextLogMessage = message; // Store it, don't print immediately
+            }
+            // Check if it's one of the other types of messages that should be printed immediately
+            else if (message.Contains("[PRE_EXECUTE_ORDER]") ||
+                     message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") ||
+                     message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") ||
+                     message.Contains("[TRADE_FAIL]"))
+            {
+                Print(message); // Print these immediately
+            }
+            // Any other message passed to DebugLog will not be printed, maintaining previous behavior for non-listed keywords.
         }
 
         protected override void OnTick()
@@ -803,13 +802,18 @@ namespace cAlgo.Robots
                 _lastAsianSessionCheck = Server.Time.Date;
             }
 
-            if (!IsStrongTrend(out trendContext))
+            bool strongTrend = IsStrongTrend(out trendContext); 
+
+            if (!strongTrend)
             {
-                DebugLog($"[DEBUG] Нет очевидного тренда, день пропускается");
+                // If there's a stored trend message from a previous tick where trend was strong, 
+                // and now it's not, we might want to clear it or let it persist.
+                // Current DebugLog logic will overwrite it if trend becomes neutral and logs that.
+                // For now, _lastTrendContextLogMessage persists if trend becomes neutral AND DebugLog doesn't update it for neutral.
+                // Let's assume DebugLog correctly updates _lastTrendContextLogMessage to a "neutral" or "no trend" message if IsStrongTrend returns false and logs that.
                 return;
             }
             // DebugLog($"[DEBUG] ======= НОВЫЙ ТИК ======= {Server.Time} =======");
-            // DebugLog($"[DEBUG] Текущий тренд: {trendContext}, цена = {currentPrice:F5}, время = {Server.Time}");
             
 
             // DebugLog($"[DEBUG] Настройки: MinRR={_minRR:F2}, MaxRR={_maxRR:F2}");
@@ -873,6 +877,13 @@ namespace cAlgo.Robots
                                       price1: bosResult.EntryPrice, 
                                       tradeType: entryTradeType.ToString(), 
                                       notes: $"Fractal Level: {fractal.Level.ToString(CultureInfo.InvariantCulture)}. M3 Bar data unavailable.");
+                    }
+                    
+                    // Print the last determined trend context before attempting to enter position
+                    if (!string.IsNullOrEmpty(_lastTrendContextLogMessage))
+                    {
+                        Print(_lastTrendContextLogMessage);
+                        _lastTrendContextLogMessage = null; // Clear after printing, so it only prints once per trade entry attempt
                     }
                     
                     DebugLog($"[DEBUG_ONTICK_PRE_ENTER_POS] Attempting to call EnterPosition for fractal at {fractal.Time} with BOS Price {bosResult.EntryPrice}");

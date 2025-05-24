@@ -34,14 +34,6 @@ namespace cAlgo.Robots
         public double StopLossBufferPips { get; set; }
 
         /// <summary>
-        /// Максимально допустимое расстояние в пипсах между уровнем M3 BOS (экстремум M3 бара, сделавшего свип) 
-        /// и ценой закрытия M3 бара, который этот уровень BOS пробивает.
-        /// Используется для фильтрации входов, если пробой слишком сильный/далекий.
-        /// </summary>
-        [Parameter("Max BOS Distance Pips", DefaultValue = 15.0, Group = "Entry")]
-        public double MaxBOSDistancePips { get; set; }
-
-        /// <summary>
         /// Максимально допустимое расстояние в пипсах между уровнем исходного H1 азиатского фрактала 
         /// и ценой входа на M3 (ценой закрытия M3 бара, подтвердившего BOS).
         /// Используется для фильтрации входов, если точка входа слишком далеко ушла от первоначального H1 фрактала.
@@ -1341,34 +1333,22 @@ namespace cAlgo.Robots
                 {
                     if (candidateBar.Close > fractal.BosLevel.Value)
                     {
-                        double distanceToBosLevelPips = (candidateBar.Close - fractal.BosLevel.Value) / Symbol.PipSize;
-                        DebugLog($"[BOS_DEBUG_BULL] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close:F5} vs BOS Level (SweepBarHigh): {fractal.BosLevel.Value:F5}. Dist to BOS Level: {distanceToBosLevelPips:F1} pips.");
+                        // MaxBOSDistancePips check is removed. We only check MaxEntryToH1FractalDistancePips now.
+                        double distFromH1FractalToEntryPips = (candidateBar.Close - fractal.Level) / Symbol.PipSize;
+                        DebugLog($"[BOS_DEBUG_BULL_H1_DIST] Dist from H1 Asian Fractal ({fractal.Level:F5}) to Entry Price ({candidateBar.Close:F5}): {distFromH1FractalToEntryPips:F1} pips. Max Allowed: {MaxEntryToH1FractalDistancePips:F1} pips.");
 
-                        if (distanceToBosLevelPips <= MaxBOSDistancePips)
-                        {
-                            // New Check: Distance from H1 Asian Fractal to Entry Price
-                            double distFromH1FractalToEntryPips = (candidateBar.Close - fractal.Level) / Symbol.PipSize;
-                            DebugLog($"[BOS_DEBUG_BULL_H1_DIST] Dist from H1 Asian Fractal ({fractal.Level:F5}) to Entry Price ({candidateBar.Close:F5}): {distFromH1FractalToEntryPips:F1} pips. Max Allowed: {MaxEntryToH1FractalDistancePips:F1} pips.");
-
-                            if (distFromH1FractalToEntryPips <= MaxEntryToH1FractalDistancePips)
+                        if (distFromH1FractalToEntryPips <= MaxEntryToH1FractalDistancePips)
                         {
                             result.IsBreak = true;
                             result.EntryPrice = candidateBar.Close;
                             result.BreakTime = candidateBar.OpenTime;
-                                DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close:F5} > BOS Level: {fractal.BosLevel.Value:F5}. Entry at market.");
+                            DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close:F5} > BOS Level: {fractal.BosLevel.Value:F5}. Entry at market.");
                             return result;
                         }
                         else
                         {
-                                DebugLog($"[BOS_REJECT_BULL_H1_DIST] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance from H1 Fractal ({distFromH1FractalToEntryPips:F1} pips) > MaxEntryToH1FractalDistancePips ({MaxEntryToH1FractalDistancePips}). Fractal Level: {fractal.Level:F5}, Entry: {candidateBar.Close:F5}. Fractal invalidated.");
-                                fractal.EntryDone = true; // Invalidate fractal for future entries due to this rule
-                                return result;
-                            }
-                        }
-                        else
-                        {
-                            DebugLog($"[BOS_REJECT_BULL_BOS_DIST] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance to BOS Level {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value:F5}, Close: {candidateBar.Close:F5}. Fractal invalidated for future entries.");
-                            fractal.EntryDone = true;
+                            DebugLog($"[BOS_REJECT_BULL_H1_DIST] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance from H1 Fractal ({distFromH1FractalToEntryPips:F1} pips) > MaxEntryToH1FractalDistancePips ({MaxEntryToH1FractalDistancePips}). Fractal Level: {fractal.Level:F5}, Entry: {candidateBar.Close:F5}. Fractal invalidated.");
+                            fractal.EntryDone = true; // Invalidate fractal for future entries due to this rule
                             return result;
                         }
                     }
@@ -1377,34 +1357,22 @@ namespace cAlgo.Robots
                 {
                     if (candidateBar.Close < fractal.BosLevel.Value)
                     {
-                        double distanceToBosLevelPips = (fractal.BosLevel.Value - candidateBar.Close) / Symbol.PipSize;
-                        DebugLog($"[BOS_DEBUG_BEAR] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close:F5} vs BOS Level (SweepBarLow): {fractal.BosLevel.Value:F5}. Dist to BOS Level: {distanceToBosLevelPips:F1} pips.");
+                        // MaxBOSDistancePips check is removed. We only check MaxEntryToH1FractalDistancePips now.
+                        double distFromH1FractalToEntryPips = (fractal.Level - candidateBar.Close) / Symbol.PipSize;
+                        DebugLog($"[BOS_DEBUG_BEAR_H1_DIST] Dist from H1 Asian Fractal ({fractal.Level:F5}) to Entry Price ({candidateBar.Close:F5}): {distFromH1FractalToEntryPips:F1} pips. Max Allowed: {MaxEntryToH1FractalDistancePips:F1} pips.");
                         
-                        if (distanceToBosLevelPips <= MaxBOSDistancePips)
-                        {
-                            // New Check: Distance from H1 Asian Fractal to Entry Price
-                            double distFromH1FractalToEntryPips = (fractal.Level - candidateBar.Close) / Symbol.PipSize;
-                            DebugLog($"[BOS_DEBUG_BEAR_H1_DIST] Dist from H1 Asian Fractal ({fractal.Level:F5}) to Entry Price ({candidateBar.Close:F5}): {distFromH1FractalToEntryPips:F1} pips. Max Allowed: {MaxEntryToH1FractalDistancePips:F1} pips.");
-
-                            if (distFromH1FractalToEntryPips <= MaxEntryToH1FractalDistancePips)
+                        if (distFromH1FractalToEntryPips <= MaxEntryToH1FractalDistancePips)
                         {
                             result.IsBreak = true;
                             result.EntryPrice = candidateBar.Close;
                             result.BreakTime = candidateBar.OpenTime;
-                                DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close:F5} < BOS Level: {fractal.BosLevel.Value:F5}. Entry at market.");
+                            DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close:F5} < BOS Level: {fractal.BosLevel.Value:F5}. Entry at market.");
                             return result;
                         }
                         else
                         {
-                                DebugLog($"[BOS_REJECT_BEAR_H1_DIST] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance from H1 Fractal ({distFromH1FractalToEntryPips:F1} pips) > MaxEntryToH1FractalDistancePips ({MaxEntryToH1FractalDistancePips}). Fractal Level: {fractal.Level:F5}, Entry: {candidateBar.Close:F5}. Fractal invalidated.");
-                                fractal.EntryDone = true; // Invalidate fractal for future entries due to this rule
-                                return result;
-                            }
-                        }
-                        else
-                        {
-                             DebugLog($"[BOS_REJECT_BEAR_BOS_DIST] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance to BOS Level {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value:F5}, Close: {candidateBar.Close:F5}. Fractal invalidated for future entries.");
-                            fractal.EntryDone = true;
+                            DebugLog($"[BOS_REJECT_BEAR_H1_DIST] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance from H1 Fractal ({distFromH1FractalToEntryPips:F1} pips) > MaxEntryToH1FractalDistancePips ({MaxEntryToH1FractalDistancePips}). Fractal Level: {fractal.Level:F5}, Entry: {candidateBar.Close:F5}. Fractal invalidated.");
+                            fractal.EntryDone = true; // Invalidate fractal for future entries due to this rule
                             return result;
                         }
                     }

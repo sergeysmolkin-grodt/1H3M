@@ -29,9 +29,6 @@ namespace cAlgo.Robots
         [Parameter("Fractal Period", DefaultValue = 3)]
         public int FractalPeriod { get; set; }
 
-        [Parameter("Risk Percent", DefaultValue = 1.0)]
-        public double RiskPercent { get; set; }
-
         [Parameter("Stop Loss Buffer Pips", DefaultValue = 1.6)]
         public double StopLossBufferPips { get; set; }
 

@@ -777,6 +777,19 @@ namespace cAlgo.Robots
                 return;
             }
 
+            var serverTime = Server.Time;
+            int currentHour = serverTime.Hour;
+
+            // Ограничение на Нью-Йоркскую сессию: не торговать с 15:00 до 22:59 UTC+3.
+            // Предполагается, что Server.Time - это UTC+0 (на 3 часа раньше UTC+3).
+            // Соответственно, блокируемый интервал по серверному времени: 12:00 до 19:59 UTC+0.
+            // Блокируемые часы сервера (UTC+0): 12, 13, 14, 15, 16, 17, 18, 19.
+            if (currentHour >= 12 && currentHour < 20) 
+            {
+                DebugLog($"[SESSION_SKIP_NY] Торговля пропущена. Текущее время сервера {serverTime:HH:mm} (предположительно UTC+0). Это соответствует {serverTime.AddHours(3):HH:mm} UTC+3, что внутри ограничения Нью-Йоркской сессии (15:00-22:59 UTC+3).");
+                return;
+            }
+
             // --- Логирование H1 бара (корректное местоположение) ---
             if (_h1Bars.Count > 0 && _h1Bars.Last(0).OpenTime != _lastH1BarTime)
             {

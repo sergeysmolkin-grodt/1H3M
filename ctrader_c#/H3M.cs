@@ -38,14 +38,34 @@ namespace cAlgo.Robots
         [Parameter("Max BOS Distance Pips", DefaultValue = 15.0)]
         public double MaxBOSDistancePips { get; set; }
 
-        [Parameter("Manual Trend Mode", DefaultValue = ManualTrendMode.Auto)]
+        // --- Контекст Параметры ---
+        [Parameter("Enable Manual Trend", DefaultValue = ManualTrendMode.Auto, Group = "Context")]
         public ManualTrendMode TrendMode { get; set; }
 
-        [Parameter("Trend Candle Lookback", DefaultValue = 25, MinValue = 5)]
+        [Parameter("Trend Candle Lookback", DefaultValue = 25, MinValue = 5, Group = "Context")]
         public int TrendCandleLookback { get; set; }
 
-        [Parameter("Trend Candle Threshold", DefaultValue = 5, MinValue = 1)]
+        [Parameter("Trend Candle Threshold", DefaultValue = 5, MinValue = 1, Group = "Context")]
         public int TrendCandleThreshold { get; set; }
+
+        [Parameter("Enable Candle Counting", DefaultValue = true, Group = "Context")]
+        public bool EnableCandleCounting { get; set; }
+
+        [Parameter("Enable Impulse Analysis", DefaultValue = true, Group = "Context")]
+        public bool EnableImpulseAnalysis { get; set; }
+
+        [Parameter("Impulse Lookback", DefaultValue = 5, MinValue = 2, Group = "Context")]
+        public int ImpulseLookback { get; set; }
+
+        [Parameter("Impulse Pip Threshold", DefaultValue = 40.0, MinValue = 1.0, Group = "Context")]
+        public double ImpulsePipThreshold { get; set; }
+
+        [Parameter("Enable Structure Analysis", DefaultValue = true, Group = "Context")]
+        public bool EnableStructureAnalysis { get; set; }
+
+        [Parameter("Structure Lookback (1H Bars to check?)", DefaultValue = 10, MinValue = 3, Group = "Context")]
+        public int StructureLookback { get; set; }
+        // --- Конец Контекст Параметры ---
 
         private const double _fixedRiskPercent = 1.0; // Fixed risk at 1%
 
@@ -515,7 +535,8 @@ namespace cAlgo.Robots
             return false;
         }
 
-        private TrendContext SimpleTrendContext()
+        // Renamed from SimpleTrendContext and reinstated full logic
+        private TrendContext EvaluateTrendContextCriteria()
         {
             // Initial check based on the parameterized lookback for candle counting
             if (_h1Bars == null || _h1Bars.Count < TrendCandleLookback) return TrendContext.Neutral; 
@@ -524,11 +545,14 @@ namespace cAlgo.Robots
             int bullish = 0, bearish = 0;
             
             // Счетчик бычьих/медвежьих баров using TrendCandleLookback
-            for (int i = 0; i < TrendCandleLookback; i++) 
+            if (EnableCandleCounting)
             {
-                if (last - i < 0) break; 
-                if (_h1Bars.ClosePrices[last - i] > _h1Bars.OpenPrices[last - i]) bullish++;
-                else if (_h1Bars.ClosePrices[last - i] < _h1Bars.OpenPrices[last - i]) bearish++;
+                for (int i = 0; i < TrendCandleLookback; i++) 
+                {
+                    if (last - i < 0) break; 
+                    if (_h1Bars.ClosePrices[last - i] > _h1Bars.OpenPrices[last - i]) bullish++;
+                    else if (_h1Bars.ClosePrices[last - i] < _h1Bars.OpenPrices[last - i]) bearish++;
+                }
             }
             
             // --- Impulse Logic ---
@@ -536,38 +560,96 @@ namespace cAlgo.Robots
             bool strongBearishImpulse = false;
             double recentMovement = 0;
 
-            if (_h1Bars.Count >= 6) 
+            if (EnableImpulseAnalysis && _h1Bars.Count >= ImpulseLookback + 1) 
             {
-                recentMovement = _h1Bars.ClosePrices[last] - _h1Bars.ClosePrices[last - 5];
-                strongBullishImpulse = recentMovement > Symbol.PipSize * 40;
-                strongBearishImpulse = recentMovement < -Symbol.PipSize * 40;
+                recentMovement = _h1Bars.ClosePrices[last] - _h1Bars.ClosePrices[last - ImpulseLookback];
+                strongBullishImpulse = recentMovement > Symbol.PipSize * ImpulsePipThreshold;
+                strongBearishImpulse = recentMovement < -Symbol.PipSize * ImpulsePipThreshold;
             }
             
-            // --- Structure Analysis Logic (HH/HL, LL/LH) --- REMOVED
-            // bool hasHigherHighs = false;
-            // bool hasHigherLows = false;
-            // bool hasLowerLows = false;
-            // bool hasLowerHighs = false;
+            // --- Structure Analysis Logic (HH/HL, LL/LH) ---
+            bool hasHigherHighs = false;
+            bool hasHigherLows = false;
+            bool hasLowerLows = false;
+            bool hasLowerHighs = false;
 
-            // if (_h1Bars.Count >= 11)
-            // {
-            //     // ... structure analysis code was here ...
-            // }
-            
-            // Принятие решения о тренде using TrendCandleThreshold and Impulse
-            if ((bullish > bearish + TrendCandleThreshold) || strongBullishImpulse) 
+            if (EnableStructureAnalysis && _h1Bars.Count >= StructureLookback + 1)
             {
-                DebugLog($"[DEBUG] Определен БЫЧИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, импульс={recentMovement/Symbol.PipSize:F1} пипсов"); // Removed HH, HL from log
+                double prevHigh = _h1Bars.HighPrices[last - StructureLookback];
+                double prevLow = _h1Bars.LowPrices[last - StructureLookback];
+                
+                for (int i = StructureLookback - 1; i >= 0; i--) 
+                {
+                    int currentIndex = last - i;
+                    if (_h1Bars.HighPrices[currentIndex] > prevHigh)
+                    {
+                        hasHigherHighs = true;
+                    }
+                    // Note: Original logic for LH might be slightly different if only one LH is needed.
+                    // This checks if *any* subsequent high is lower than a *previous* high in the sequence.
+                    // A more common definition of LH for downtrend would be current high < previous significant high.
+                    // For simplicity, this structure check might need refinement based on precise strategy.
+                    else if (_h1Bars.HighPrices[currentIndex] < prevHigh) 
+                    {
+                        hasLowerHighs = true;
+                    }
+                    
+                    if (_h1Bars.LowPrices[currentIndex] > prevLow)
+                    {                       
+                        hasHigherLows = true;
+                    }
+                    else if (_h1Bars.LowPrices[currentIndex] < prevLow)
+                    {
+                        hasLowerLows = true;
+                    }
+                    
+                    prevHigh = _h1Bars.HighPrices[currentIndex];
+                    prevLow = _h1Bars.LowPrices[currentIndex];
+                }
+            }
+            
+            // Принятие решения о тренде
+            bool bullishCondition = false;
+            if (EnableCandleCounting)
+            {
+                bullishCondition = bullishCondition || (bullish > bearish + TrendCandleThreshold);
+            }
+            if (EnableImpulseAnalysis)
+            {
+                bullishCondition = bullishCondition || strongBullishImpulse;
+            }
+            if (EnableStructureAnalysis)
+            {
+                bullishCondition = bullishCondition || (hasHigherHighs && hasHigherLows);
+            }
+
+            if (bullishCondition) 
+            {
+                DebugLog($"[DEBUG] Определен БЫЧИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, HH={hasHigherHighs}, HL={hasHigherLows}, импульс={recentMovement/Symbol.PipSize:F1} пипсов (Свечи вкл: {EnableCandleCounting}, Структура вкл: {EnableStructureAnalysis}, Импульс вкл: {EnableImpulseAnalysis})");
                 return TrendContext.Bullish;
             }
             
-            if ((bearish > bullish + TrendCandleThreshold) || strongBearishImpulse) 
+            bool bearishCondition = false;
+            if (EnableCandleCounting)
             {
-                DebugLog($"[DEBUG] Определен МЕДВЕЖИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, импульс={recentMovement/Symbol.PipSize:F1} пипсов"); // Removed LL, LH from log
+                bearishCondition = bearishCondition || (bearish > bullish + TrendCandleThreshold);
+            }
+            if (EnableImpulseAnalysis)
+            {
+                bearishCondition = bearishCondition || strongBearishImpulse;
+            }
+            if (EnableStructureAnalysis)
+            {
+                bearishCondition = bearishCondition || (hasLowerLows && hasLowerHighs);
+            }
+
+            if (bearishCondition) 
+            {
+                DebugLog($"[DEBUG] Определен МЕДВЕЖИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, LL={hasLowerLows}, LH={hasLowerHighs}, импульс={recentMovement/Symbol.PipSize:F1} пипсов (Свечи вкл: {EnableCandleCounting}, Структура вкл: {EnableStructureAnalysis}, Импульс вкл: {EnableImpulseAnalysis})");
                 return TrendContext.Bearish;
             }
             
-            DebugLog($"[DEBUG] Определен НЕЙТРАЛЬНЫЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, движение={recentMovement/Symbol.PipSize:F1} пипсов");
+            DebugLog($"[DEBUG] Определен НЕЙТРАЛЬНЫЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, HH={hasHigherHighs}, HL={hasHigherLows}, LL={hasLowerLows}, LH={hasLowerHighs}, движение={recentMovement/Symbol.PipSize:F1} пипсов (Свечи вкл: {EnableCandleCounting}, Структура вкл: {EnableStructureAnalysis}, Импульс вкл: {EnableImpulseAnalysis})");
             return TrendContext.Neutral;
         }
 
@@ -1184,7 +1266,7 @@ namespace cAlgo.Robots
 
         private bool IsStrongTrend(out TrendContext context)
         {
-            context = SimpleTrendContext();
+            context = EvaluateTrendContextCriteria(); // Changed to call the new method
             return context != TrendContext.Neutral;
         }
 

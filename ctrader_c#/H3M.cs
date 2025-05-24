@@ -41,6 +41,12 @@ namespace cAlgo.Robots
         [Parameter("Manual Trend Mode", DefaultValue = ManualTrendMode.Auto)]
         public ManualTrendMode TrendMode { get; set; }
 
+        [Parameter("Trend Candle Lookback", DefaultValue = 25, MinValue = 5)]
+        public int TrendCandleLookback { get; set; }
+
+        [Parameter("Trend Candle Threshold", DefaultValue = 5, MinValue = 1)]
+        public int TrendCandleThreshold { get; set; }
+
         private const double _fixedRiskPercent = 1.0; // Fixed risk at 1%
 
         private const double _minRR = 1.3;
@@ -61,6 +67,8 @@ namespace cAlgo.Robots
         private bool _loggedSpecificBarDataThisInstance = false;
         private DateTime _debugSpecificTimestamp = DateTime.MinValue;
         private HashSet<DateTime> _loggedOHLCBarsForTargetDate = new HashSet<DateTime>();
+
+        private string _lastTrendContextLogMessage = null; // For storing the last trend context message determined by DebugLog
 
         private StreamWriter _chartDataWriter;
         private string _csvFilePath;
@@ -448,7 +456,7 @@ namespace cAlgo.Robots
         private void CheckAsianSession()
         {
             var currentTime = Server.Time;
-            if (currentTime.Date != _lastAsianSessionCheck.Date)
+            if (currentTime.Date != _lastAsianSessionCheck)
             {
                 _isAsianSession = IsAsianSession();
                 _lastAsianSessionCheck = currentTime;
@@ -509,70 +517,57 @@ namespace cAlgo.Robots
 
         private TrendContext SimpleTrendContext()
         {
-            if (_h1Bars == null || _h1Bars.Count < 25) return TrendContext.Neutral;
+            // Initial check based on the parameterized lookback for candle counting
+            if (_h1Bars == null || _h1Bars.Count < TrendCandleLookback) return TrendContext.Neutral; 
             
             int last = _h1Bars.Count - 1;
             int bullish = 0, bearish = 0;
             
-            // Счетчик бычьих/медвежьих баров
-            for (int i = 0; i < 25; i++)
+            // Счетчик бычьих/медвежьих баров using TrendCandleLookback
+            for (int i = 0; i < TrendCandleLookback; i++) 
             {
+                if (last - i < 0) break; 
                 if (_h1Bars.ClosePrices[last - i] > _h1Bars.OpenPrices[last - i]) bullish++;
                 else if (_h1Bars.ClosePrices[last - i] < _h1Bars.OpenPrices[last - i]) bearish++;
             }
             
-            // Проверка на наличие сильного импульса (более 40 пипсов за последние 5 баров)
-            double recentMovement = _h1Bars.ClosePrices[last] - _h1Bars.ClosePrices[last - 5];
-            bool strongBullishImpulse = recentMovement > Symbol.PipSize * 40;
-            bool strongBearishImpulse = recentMovement < -Symbol.PipSize * 40;
-            
-            // Анализ структуры (HH-HL или LL-LH)
-            bool hasHigherHighs = false;
-            bool hasHigherLows = false;
-            bool hasLowerLows = false;
-            bool hasLowerHighs = false;
-            
-            double prevHigh = _h1Bars.HighPrices[last - 10];
-            double prevLow = _h1Bars.LowPrices[last - 10];
-            
-            for (int i = 9; i >= 0; i--)
+            // --- Impulse Logic ---
+            bool strongBullishImpulse = false;
+            bool strongBearishImpulse = false;
+            double recentMovement = 0;
+
+            if (_h1Bars.Count >= 6) 
             {
-                if (_h1Bars.HighPrices[last - i] > prevHigh)
-                {
-                    hasHigherHighs = true;
-                }
-                else if (_h1Bars.HighPrices[last - i] < prevHigh)
-                {
-                    hasLowerHighs = true;
-                }
-                
-                if (_h1Bars.LowPrices[last - i] > prevLow)
-                {
-                    hasHigherLows = true;
-                }
-                else if (_h1Bars.LowPrices[last - i] < prevLow)
-                {
-                    hasLowerLows = true;
-                }
-                
-                prevHigh = _h1Bars.HighPrices[last - i];
-                prevLow = _h1Bars.LowPrices[last - i];
+                recentMovement = _h1Bars.ClosePrices[last] - _h1Bars.ClosePrices[last - 5];
+                strongBullishImpulse = recentMovement > Symbol.PipSize * 40;
+                strongBearishImpulse = recentMovement < -Symbol.PipSize * 40;
             }
             
-            // Принятие решения о тренде
-            if ((bullish > bearish + 5) || (hasHigherHighs && hasHigherLows) || strongBullishImpulse)
+            // --- Structure Analysis Logic (HH/HL, LL/LH) --- REMOVED
+            // bool hasHigherHighs = false;
+            // bool hasHigherLows = false;
+            // bool hasLowerLows = false;
+            // bool hasLowerHighs = false;
+
+            // if (_h1Bars.Count >= 11)
+            // {
+            //     // ... structure analysis code was here ...
+            // }
+            
+            // Принятие решения о тренде using TrendCandleThreshold and Impulse
+            if ((bullish > bearish + TrendCandleThreshold) || strongBullishImpulse) 
             {
-                // DebugLog($"[DEBUG] Определен БЫЧИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, HH={hasHigherHighs}, HL={hasHigherLows}, импульс={recentMovement/Symbol.PipSize:F1} пипсов");
+                DebugLog($"[DEBUG] Определен БЫЧИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, импульс={recentMovement/Symbol.PipSize:F1} пипсов"); // Removed HH, HL from log
                 return TrendContext.Bullish;
             }
             
-            if ((bearish > bullish + 5) || (hasLowerLows && hasLowerHighs) || strongBearishImpulse)
+            if ((bearish > bullish + TrendCandleThreshold) || strongBearishImpulse) 
             {
-                // DebugLog($"[DEBUG] Определен МЕДВЕЖИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, LL={hasLowerLows}, LH={hasLowerHighs}, импульс={recentMovement/Symbol.PipSize:F1} пипсов");
+                DebugLog($"[DEBUG] Определен МЕДВЕЖИЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, импульс={recentMovement/Symbol.PipSize:F1} пипсов"); // Removed LL, LH from log
                 return TrendContext.Bearish;
             }
             
-            // DebugLog($"[DEBUG] Определен НЕЙТРАЛЬНЫЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, движение={recentMovement/Symbol.PipSize:F1} пипсов");
+            DebugLog($"[DEBUG] Определен НЕЙТРАЛЬНЫЙ тренд: быч.свечей={bullish}, медв.свечей={bearish}, движение={recentMovement/Symbol.PipSize:F1} пипсов");
             return TrendContext.Neutral;
         }
 
@@ -719,52 +714,41 @@ namespace cAlgo.Robots
 
         private void DebugLog(string message)
         {
-            var time = Server.Time; // Current server time for context
+            // Выводить в консоль только сообщения, касающиеся определения контекста тренда,
+            // параметров исполняемой сделки или ошибки исполнения сделки.
+            // if (message.Contains("[DEBUG] Определен") ||      // Сообщения об определении контекста тренда
+            //     message.Contains("[PRE_EXECUTE_ORDER]") ||        // Попытка исполнить сделку с её параметрами
+            //     message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") || // Детали успешно открытой сделки до модификации SL/TP
+            //     message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") || // Детали успешно открытой сделки после модификации SL/TP
+            //     message.Contains("[TRADE_FAIL]"))                 // Сообщение о неудачной попытке открыть сделку
+            // {
+            //     Print(message); // Выводим сообщение в лог cTrader
+            // }
+            // Все остальные вызовы DebugLog с другими сообщениями будут проигнорированы (не будут выведены в консоль).
 
-            // Special handling for the target debugging date
-            if (time.Date == new DateTime(2025, 5, 14)) // MODIFIED: Reverted date for detailed logging
+            // Check if it's a trend context message
+            bool isTrendContextMessage = message.Contains("[DEBUG] Определен") ||
+                                         message.Contains("[DEBUG] Очевидный бычий тренд") ||
+                                         message.Contains("[DEBUG] Очевидный медвежий тренд") ||
+                                         message.Contains("[DEBUG] Бычий контекст:") ||
+                                         message.Contains("[DEBUG] Медвежий контекст:") ||
+                                         message.Contains("[DEBUG] Bullish Context:") ||
+                                         message.Contains("[DEBUG] Bearish Context:") ||
+                                         message.Contains("[DEBUG] No Clear Trend Context");
+
+            if (isTrendContextMessage)
             {
-                // For the target date, print messages that have any of our key debug tags
-                // or are specifically marked for this date.
-                bool shouldPrintOnTargetDate =
-                    message.Contains("[DEBUG]") || // General debug prefix
-                    message.Contains("[SWEEP_") || // Covers [SWEEP_BULL], [SWEEP_BEAR]
-                    message.Contains("[BOS_") ||   // Covers [BOS_DEBUG_...], [BOS_SUCCESS_...], [BOS_REJECT_...]
-                    message.Contains("[TP_DEBUG]") || // Main TP debug tag
-                    message.Contains("[TP_DEBUG_ALL_RAW_FRACTALS]") || // Specific tag for raw fractals
-                    message.Contains("[TP_DEBUG_SORTED_LIST]") || // Specific tag for sorted list
-                    message.Contains("[TP_DEBUG_SORTED_LIST_FULL]") || // Ensure this tag is also included for printing
-                    message.Contains("[TP_REJECT]") ||
-                    message.Contains("[TRADE_") || // Covers [TRADE_OPEN], [TRADE_FAIL]
-                    message.Contains("[ERROR_") || // Covers [ERROR_ENTRY]
-                    message.Contains("[VOL_REJECT]") ||
-                    message.Contains("[SL_ADJUST]") ||
-                    message.Contains("[DEBUG_OHLC_M3]") || // Specific M3 OHLC logging for 06:03, 06:15
-                    message.Contains("[DEBUG_OHLC_BAR_SPECIFIC_FOR_BOS_CHECK]") || // Specific OHLC from Is3mStructureBreak
-                    message.Contains("[USER_TARGET_LOG 14.05.2025]") || // MODIFIED: Reverted date in user tag
-                    message.Contains("Азиатский фрактал") || // Fractal finding logs
-                    message.Contains("Найден") || // Fractal finding logs
-                    message.Contains("Нет очевидного тренда") ||
-                    message.Contains("НОВЫЙ ТИК") ||
-                    message.Contains("КОНЕЦ ТИКА") ||
-                    message.Contains("Текущий тренд") ||
-                    message.Contains("Уже была сделка сегодня") ||
-                    message.Contains("Поиск фракталов") ||
-                    message.Contains("Проверка свипа фракталов") ||
-                    message.Contains("[PRE_EXECUTE_ORDER]") ||
-                    message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") || // Новый лог
-                    message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") || // Новый лог
-                    message.Contains("[INITIAL_SYMBOL_INFO]");
-
-                if (shouldPrintOnTargetDate)
-                {
-                    Print(message);
-                }
-                return; // Explicitly return to process logs only based on above for this date
+                _lastTrendContextLogMessage = message; // Store it, don't print immediately
             }
-
-            // Default behavior for other dates: suppress logs unless a global debug flag is enabled (not implemented here)
-            // For now, this means logs will only appear for 2025-05-20 based on the logic above.
+            // Check if it's one of the other types of messages that should be printed immediately
+            else if (message.Contains("[PRE_EXECUTE_ORDER]") ||
+                     message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") ||
+                     message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") ||
+                     message.Contains("[TRADE_FAIL]"))
+            {
+                Print(message); // Print these immediately
+            }
+            // Any other message passed to DebugLog will not be printed, maintaining previous behavior for non-listed keywords.
         }
 
         protected override void OnTick()
@@ -818,13 +802,18 @@ namespace cAlgo.Robots
                 _lastAsianSessionCheck = Server.Time.Date;
             }
 
-            if (!IsStrongTrend(out trendContext))
+            bool strongTrend = IsStrongTrend(out trendContext); 
+
+            if (!strongTrend)
             {
-                DebugLog($"[DEBUG] Нет очевидного тренда, день пропускается");
+                // If there's a stored trend message from a previous tick where trend was strong, 
+                // and now it's not, we might want to clear it or let it persist.
+                // Current DebugLog logic will overwrite it if trend becomes neutral and logs that.
+                // For now, _lastTrendContextLogMessage persists if trend becomes neutral AND DebugLog doesn't update it for neutral.
+                // Let's assume DebugLog correctly updates _lastTrendContextLogMessage to a "neutral" or "no trend" message if IsStrongTrend returns false and logs that.
                 return;
             }
             // DebugLog($"[DEBUG] ======= НОВЫЙ ТИК ======= {Server.Time} =======");
-            // DebugLog($"[DEBUG] Текущий тренд: {trendContext}, цена = {currentPrice:F5}, время = {Server.Time}");
             
 
             // DebugLog($"[DEBUG] Настройки: MinRR={_minRR:F2}, MaxRR={_maxRR:F2}");
@@ -888,6 +877,13 @@ namespace cAlgo.Robots
                                       price1: bosResult.EntryPrice, 
                                       tradeType: entryTradeType.ToString(), 
                                       notes: $"Fractal Level: {fractal.Level.ToString(CultureInfo.InvariantCulture)}. M3 Bar data unavailable.");
+                    }
+                    
+                    // Print the last determined trend context before attempting to enter position
+                    if (!string.IsNullOrEmpty(_lastTrendContextLogMessage))
+                    {
+                        Print(_lastTrendContextLogMessage);
+                        _lastTrendContextLogMessage = null; // Clear after printing, so it only prints once per trade entry attempt
                     }
                     
                     DebugLog($"[DEBUG_ONTICK_PRE_ENTER_POS] Attempting to call EnterPosition for fractal at {fractal.Time} with BOS Price {bosResult.EntryPrice}");

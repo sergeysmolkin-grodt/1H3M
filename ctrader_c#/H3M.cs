@@ -33,8 +33,21 @@ namespace cAlgo.Robots
         [Parameter("Stop Loss Buffer Pips", DefaultValue = 1.6)]
         public double StopLossBufferPips { get; set; }
 
-        [Parameter("Max BOS Distance Pips", DefaultValue = 15.0)]
+        /// <summary>
+        /// Максимально допустимое расстояние в пипсах между уровнем M3 BOS (экстремум M3 бара, сделавшего свип) 
+        /// и ценой закрытия M3 бара, который этот уровень BOS пробивает.
+        /// Используется для фильтрации входов, если пробой слишком сильный/далекий.
+        /// </summary>
+        [Parameter("Max BOS Distance Pips", DefaultValue = 15.0, Group = "Entry")]
         public double MaxBOSDistancePips { get; set; }
+
+        /// <summary>
+        /// Максимально допустимое расстояние в пипсах между уровнем исходного H1 азиатского фрактала 
+        /// и ценой входа на M3 (ценой закрытия M3 бара, подтвердившего BOS).
+        /// Используется для фильтрации входов, если точка входа слишком далеко ушла от первоначального H1 фрактала.
+        /// </summary>
+        [Parameter("Max Entry to H1F Distance (Pips)", DefaultValue = 20.0, Group = "Entry", MinValue = 1.0)]
+        public double MaxEntryToH1FractalDistancePips { get; set; }
 
         // --- Контекст Параметры ---
         [Parameter("Enable Manual Trend", DefaultValue = ManualTrendMode.Auto, Group = "Context")]
@@ -66,6 +79,8 @@ namespace cAlgo.Robots
 
         [Parameter("Structure Confirmation Count", DefaultValue = 2, MinValue = 1, Group = "Context")]
         public int StructureConfirmationCount { get; set; }
+
+        
         // --- Конец Контекст Параметры ---
 
         private const double _fixedRiskPercent = 1.0; // Fixed risk at 1%
@@ -363,66 +378,153 @@ namespace cAlgo.Robots
         {
             if (_lastTradeDate.Date == Server.Time.Date && Positions.Count > 0)
             {
-                DebugLog("Trading limit: One trade per symbol per day. Position already exists or trade executed today.");
+                DebugLog("[INFO_ENTRY_REJECT] Trading limit: One trade per symbol per day. Position already exists or trade executed today.");
                 return;
             }
 
             if (fractal == null || fractal.SweepExtreme == null || fractal.BosLevel == null)
             {
-                DebugLog("[ERROR_ENTRY] Fractal or its SweepExtreme/BosLevel is null. Cannot calculate SL.");
+                DebugLog("[ERROR_ENTRY] Fractal, its SweepExtreme, or BosLevel is null. Cannot calculate SL/TP.");
                 return;
             }
             
             double slPrice;
             string slCalculationBasis;
 
+            // 1. Calculate SL based on fractal.SweepExtreme.Value
             if (tradeType == TradeType.Buy)
             {
-                // SL is below the Asian H1 fractal level
-                slPrice = Math.Round(fractal.Level - StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
-                slCalculationBasis = $"AsianFractal.Level ({fractal.Level:F5}) - Buffer ({StopLossBufferPips} pips)";
+                slPrice = Math.Round(fractal.SweepExtreme.Value - StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
+                slCalculationBasis = $"fractal.SweepExtreme.Value ({fractal.SweepExtreme.Value:F5}) - Buffer ({StopLossBufferPips} pips)";
             }
             else // Sell
             {
-                // SL is above the Asian H1 fractal level
-                slPrice = Math.Round(fractal.Level + StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
-                slCalculationBasis = $"AsianFractal.Level ({fractal.Level:F5}) + Buffer ({StopLossBufferPips} pips)";
+                slPrice = Math.Round(fractal.SweepExtreme.Value + StopLossBufferPips * Symbol.PipSize, Symbol.Digits);
+                slCalculationBasis = $"fractal.SweepExtreme.Value ({fractal.SweepExtreme.Value:F5}) + Buffer ({StopLossBufferPips} pips)";
             }
-            DebugLog($"[DEBUG_SL_CALC] EntryPrice for SL calc: {entryPrice:F5}, AsianFractal Level: {fractal.Level:F5}, SL Buffer: {StopLossBufferPips}, Calculated SL Price: {slPrice:F5}");
+            DebugLog($"[DEBUG_SL_CALC_INIT] Initial SL based on SweepExtreme: {slPrice:F5}. Basis: {slCalculationBasis}. Entry: {entryPrice:F5}");
+
+            // 2. Validate and Adjust SL
+            bool slIsInvalid = false;
+            string slInvalidReason = "";
+
+            if (tradeType == TradeType.Buy)
+            {
+                if (slPrice >= entryPrice)
+                {
+                    slIsInvalid = true;
+                    slInvalidReason = $"SL ({slPrice:F5}) not below entry ({entryPrice:F5}) for BUY.";
+                }
+                else if ((entryPrice - slPrice) < Symbol.MinStopLossDistance)
+                {
+                    slIsInvalid = true;
+                    slInvalidReason = $"SL ({slPrice:F5}) for BUY too close to entry ({entryPrice:F5}). Distance: {(entryPrice - slPrice)/Symbol.PipSize:F1} pips. MinBrokerDist: {Symbol.MinStopLossDistance/Symbol.PipSize:F1} pips.";
+                }
+            }
+            else // Sell
+            {
+                if (slPrice <= entryPrice)
+                {
+                    slIsInvalid = true;
+                    slInvalidReason = $"SL ({slPrice:F5}) not above entry ({entryPrice:F5}) for SELL.";
+                }
+                else if ((slPrice - entryPrice) < Symbol.MinStopLossDistance)
+                {
+                    slIsInvalid = true;
+                    slInvalidReason = $"SL ({slPrice:F5}) for SELL too close to entry ({entryPrice:F5}). Distance: {(slPrice - entryPrice)/Symbol.PipSize:F1} pips. MinBrokerDist: {Symbol.MinStopLossDistance/Symbol.PipSize:F1} pips.";
+                }
+            }
+
+            if (slIsInvalid)
+            {
+                DebugLog($"[SL_ADJUST_NEEDED] Reason: {slInvalidReason}");
+                double minSafeSlPips = Math.Max(5.0, (Symbol.MinStopLossDistance / Symbol.PipSize) + 1.0);
+                DebugLog($"[SL_ADJUST_ACTION] Adjusting SL. MinSafePips based on BrokerMinDistance+1 or 5pips: {minSafeSlPips:F1}. Entry: {entryPrice:F5}");
+                if (tradeType == TradeType.Buy)
+                {
+                    slPrice = Math.Round(entryPrice - minSafeSlPips * Symbol.PipSize, Symbol.Digits);
+                }
+                else // Sell
+                {
+                    slPrice = Math.Round(entryPrice + minSafeSlPips * Symbol.PipSize, Symbol.Digits);
+                }
+                slCalculationBasis = $"Adjusted SL to be {minSafeSlPips:F1} pips from entry ({entryPrice:F5}).";
+                DebugLog($"[SL_ADJUST_FINAL] Adjusted SL is now: {slPrice:F5}");
+            }
             
             var stopLossPips = Math.Abs(entryPrice - slPrice) / Symbol.PipSize;
-            if (stopLossPips < 1.0) // Minimum 1 pip SL
+            // The old SL adjustment for stopLossPips < 1.0 is now covered by the more robust validation above.
+            // However, we must ensure stopLossPips is not zero for position size calculation.
+            if (stopLossPips < 0.1) // Effectively zero or extremely small, avoid division by zero for position size.
             {
-                DebugLog($"[SL_ADJUST] Calculated SL ({stopLossPips} pips) is too small. Adjusting SL.");
-                if (tradeType == TradeType.Buy)
-                    slPrice = Math.Round(entryPrice - Symbol.PipSize * 5, Symbol.Digits); // Min 5 pips SL
-                else
-                    slPrice = Math.Round(entryPrice + Symbol.PipSize * 5, Symbol.Digits);
-                stopLossPips = Math.Abs(entryPrice - slPrice) / Symbol.PipSize;
+                 DebugLog($"[ERROR_ENTRY] Adjusted Stop Loss pips ({stopLossPips:F2}) is too small or zero. Cannot calculate position size. SL: {slPrice:F5}, Entry: {entryPrice:F5}");
+                 return;
             }
 
             var tpResult = CalculateTakeProfit(tradeType, entryPrice, slPrice);
-            if (tpResult.takeProfitPrice == null || tpResult.rr < _minRR)
+            
+            // 3. Validate TP (after it's calculated)
+            if (tpResult.takeProfitPrice != null)
             {
-                DebugLog($"[TP_REJECT] TP calculation failed or RR too low ({tpResult.rr}). MinRR: {_minRR}. Entry: {entryPrice}, SL: {slPrice}");
+                bool tpIsInvalid = false;
+                string tpInvalidReason = "";
+                if (tradeType == TradeType.Buy)
+                {
+                    if (tpResult.takeProfitPrice.Value <= entryPrice) 
+                    {
+                        tpIsInvalid = true; 
+                        tpInvalidReason = $"TP ({tpResult.takeProfitPrice.Value:F5}) not above entry ({entryPrice:F5}) for BUY.";
+                    }
+                    else if (tpResult.takeProfitPrice.Value - entryPrice < Symbol.MinTakeProfitDistance) 
+                    {
+                        tpIsInvalid = true;
+                        tpInvalidReason = $"TP ({tpResult.takeProfitPrice.Value:F5}) for BUY too close to entry ({entryPrice:F5}). Distance: {(tpResult.takeProfitPrice.Value - entryPrice)/Symbol.PipSize:F1} pips. MinBrokerDist: {Symbol.MinTakeProfitDistance/Symbol.PipSize:F1} pips.";
+                    }
+                }
+                else // Sell
+                {
+                    if (tpResult.takeProfitPrice.Value >= entryPrice) 
+                    {
+                        tpIsInvalid = true; 
+                        tpInvalidReason = $"TP ({tpResult.takeProfitPrice.Value:F5}) not below entry ({entryPrice:F5}) for SELL.";
+                    }
+                    else if (entryPrice - tpResult.takeProfitPrice.Value < Symbol.MinTakeProfitDistance) 
+                    {
+                        tpIsInvalid = true;
+                        tpInvalidReason = $"TP ({tpResult.takeProfitPrice.Value:F5}) for SELL too close to entry ({entryPrice:F5}). Distance: {(entryPrice - tpResult.takeProfitPrice.Value)/Symbol.PipSize:F1} pips. MinBrokerDist: {Symbol.MinTakeProfitDistance/Symbol.PipSize:F1} pips.";
+                    }
+                }
+
+                if (tpIsInvalid)
+                {
+                    DebugLog($"[TP_INVALID_REJECT] Reason: {tpInvalidReason}. Trade REJECTED.");
+                    return; 
+                }
+            }
+            else // tpResult.takeProfitPrice is null
+            {
+                 DebugLog($"[TP_REJECT] TP calculation failed (returned null) or RR too low ({tpResult.rr:F2}). MinRR: {_minRR:F2}. Entry: {entryPrice:F5}, SL: {slPrice:F5}");
+                 return;
+            }
+            // Additional check for RR, though CalculateTakeProfit should handle it.
+            if (tpResult.rr < _minRR)
+            {
+                 DebugLog($"[TP_REJECT_RR] RR ({tpResult.rr:F2}) is below MinRR ({_minRR:F2}). Entry: {entryPrice:F5}, SL: {slPrice:F5}, TP: {tpResult.takeProfitPrice.Value:F5}. Trade REJECTED.");
                 return;
             }
 
             var positionSize = CalculatePositionSize(stopLossPips);
             if (positionSize < Symbol.VolumeInUnitsMin)
             {
-                DebugLog($"[VOL_REJECT] Calculated position size {positionSize} is less than min volume {Symbol.VolumeInUnitsMin}. SL pips: {stopLossPips}");
+                DebugLog($"[VOL_REJECT] Calculated position size {positionSize} is less than min volume {Symbol.VolumeInUnitsMin}. SL pips: {stopLossPips:F2}");
                 return;
             }
 
             var label = $"H3M_{tradeType}_{Server.Time.ToShortTimeString()}";
             
-            // НОВЫЙ ЛОГ ПЕРЕД ИСПОЛНЕНИЕМ
-            DebugLog($"[PRE_EXECUTE_ORDER] Attempting to execute market order. Symbol: {SymbolName}, Type: {tradeType}, Size: {positionSize}, Label: {label}, SL: {slPrice:F5}, TP: {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"}");
+            DebugLog($"[PRE_EXECUTE_ORDER_FINAL_PARAMS] Attempting order. Symbol: {SymbolName}, Type: {tradeType}, Size: {positionSize}, Label: {label}, SL: {slPrice:F5}, TP: {tpResult.takeProfitPrice.Value:F5}");
 
-            // ВРЕМЕННО ДЛЯ ДИАГНОСТИКИ: Вызываем без SL/TP
             var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, label, null, null);
-            // var result = ExecuteMarketOrder(tradeType, SymbolName, positionSize, label, slPrice, tpResult.takeProfitPrice); // ОРИГИНАЛЬНЫЙ ВЫЗОВ
 
             if (result.IsSuccessful)
             {
@@ -430,26 +532,16 @@ namespace cAlgo.Robots
                 _lastTradeDate = Server.Time.Date;
                 var position = result.Position;
 
-                DebugLog($"[TRADE_OPEN_ACTUAL_PRE_MODIFY] {tradeType} order successful. Price: {position.EntryPrice:F5}, Initial SL: {position.StopLoss?.ToString("F5") ?? "N/A"}, Initial TP: {position.TakeProfit?.ToString("F5") ?? "N/A"}. Attempting to modify SL to {slPrice:F5} and TP to {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"}.");
+                DebugLog($"[TRADE_OPEN_ACTUAL_PRE_MODIFY] {tradeType} order successful. Price: {position.EntryPrice:F5}, Initial SL: {position.StopLoss?.ToString("F5") ?? "N/A"}, Initial TP: {position.TakeProfit?.ToString("F5") ?? "N/A"}. Attempting to modify SL to {slPrice:F5} and TP to {tpResult.takeProfitPrice.Value:F5}.");
 
-                // Modify Stop Loss and Take Profit asynchronously in a single call
-                if (position.StopLoss != slPrice || position.TakeProfit != tpResult.takeProfitPrice)
+                if (position.StopLoss != slPrice || position.TakeProfit != tpResult.takeProfitPrice.Value)
                 {
-                    ModifyPositionAsync(position, slPrice, tpResult.takeProfitPrice);
+                    ModifyPositionAsync(position, slPrice, tpResult.takeProfitPrice.Value);
                 }
+                
+                DebugLog($"[TRADE_OPEN_ACTUAL_POST_MODIFY] {tradeType} order successful. Price: {position.EntryPrice:F5}, SL sent for modification: {slPrice:F5}, TP sent for modification: {tpResult.takeProfitPrice.Value:F5}. SL Basis: {slCalculationBasis}, TP RR: {tpResult.rr:F2}. Size: {positionSize}");
 
-                // Поскольку это асинхронный вызов, мы не будем здесь ждать его завершения в OnTick,
-                // но для целей отладки мы могли бы добавить обработку завершения (не в этом шаге).
-
-                // Лог TRADE_OPEN_ACTUAL будет теперь отражать состояние SL/TP *после* попытки модификации,
-                // но это произойдет на следующем тике, когда позиция обновится.
-                // Для более точного лога моментальной установки, мы бы использовали .Result или await,
-                // но это может заблокировать OnTick, что нежелательно.
-                // Поэтому, пока оставим как есть и посмотрим на логи следующего тика или на итоговое состояние сделки.
-
-                DebugLog($"[TRADE_OPEN_ACTUAL_POST_MODIFY] {tradeType} order successful. Price: {position.EntryPrice:F5}, SL sent for modification: {slPrice:F5}, TP sent for modification: {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"}. Intended SL (Original Calc): {slPrice:F5} (Basis: {slCalculationBasis}), Intended TP (Original Calc): {tpResult.takeProfitPrice?.ToString("F5") ?? "N/A"} (RR: {tpResult.rr}). Size: {positionSize}");
-
-                LogChartEvent(position.EntryTime, "TRADE_ENTRY", price1: position.EntryPrice, price2: slPrice, tradeType: tradeType.ToString(), notes: $"Intended TP: {tpResult.takeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}, RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}, Label: {label}, Modified SL: {slPrice.ToString(CultureInfo.InvariantCulture)}, Modified TP: {tpResult.takeProfitPrice?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}");
+                LogChartEvent(position.EntryTime, "TRADE_ENTRY", price1: position.EntryPrice, price2: slPrice, tradeType: tradeType.ToString(), notes: $"Intended TP: {tpResult.takeProfitPrice.Value.ToString(CultureInfo.InvariantCulture)}, RR: {tpResult.rr.ToString("F2", CultureInfo.InvariantCulture)}, Label: {label}, SL: {slPrice.ToString(CultureInfo.InvariantCulture)}, TP: {tpResult.takeProfitPrice.Value.ToString(CultureInfo.InvariantCulture)}");
             }
             else
             {
@@ -548,11 +640,11 @@ namespace cAlgo.Robots
             // Счетчик бычьих/медвежьих баров using TrendCandleLookback
             if (EnableCandleCounting)
             {
-                for (int i = 0; i < TrendCandleLookback; i++) 
-                {
-                    if (last - i < 0) break; 
-                    if (_h1Bars.ClosePrices[last - i] > _h1Bars.OpenPrices[last - i]) bullish++;
-                    else if (_h1Bars.ClosePrices[last - i] < _h1Bars.OpenPrices[last - i]) bearish++;
+            for (int i = 0; i < TrendCandleLookback; i++) 
+            {
+                if (last - i < 0) break; 
+                if (_h1Bars.ClosePrices[last - i] > _h1Bars.OpenPrices[last - i]) bullish++;
+                else if (_h1Bars.ClosePrices[last - i] < _h1Bars.OpenPrices[last - i]) bearish++;
                 }
             }
             
@@ -1146,47 +1238,65 @@ namespace cAlgo.Robots
 
                 bool sweptThisTick = false;
                 string sweepType = "";
+                bool validSweepBodyClosure = false;
 
                 if (trendContext == TrendContext.Bullish || TrendMode == ManualTrendMode.Bullish)
                 {
-                    if (currentM3Bar.Low < fractal.Level)
+                    if (currentM3Bar.Low < fractal.Level) // Wick swept the low fractal
                     {
+                        if (currentM3Bar.Close > fractal.Level) // Body closed back above the fractal
+                        {
+                            validSweepBodyClosure = true;
                         fractal.IsSwept = true;
-                        sweptThisTick = true;
-                        fractal.SweepLevel = fractal.Level;
-                        fractal.SweepExtreme = currentM3Bar.Low;
-                        fractal.SweepBarIndex = m3Bars.Count - 2;
+                            fractal.SweepLevel = fractal.Level; // The H1 fractal level itself
+                            fractal.SweepExtreme = currentM3Bar.Low; // The lowest point of the M3 sweep bar
+                            fractal.SweepBarIndex = m3Bars.Count - 2; // Index of currentM3Bar (which is m3Bars.Last(1))
 
-                        fractal.BosLevel = currentM3Bar.High;
+                            fractal.BosLevel = currentM3Bar.High; // Potential BOS level is the high of the M3 sweep bar
                         fractal.LastBosCheckBarIndex = m3Bars.Count - 2;
 
-                        DebugLog($"[SWEEP_BULL] Low fractal {fractal.Level} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar L: {currentM3Bar.Low}, H: {currentM3Bar.High}. New BOS Level: {fractal.BosLevel}");
+                            DebugLog($"[SWEEP_BULL_VALID] Low fractal {fractal.Level:F5} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar L: {currentM3Bar.Low:F5}, C: {currentM3Bar.Close:F5}, H: {currentM3Bar.High:F5}. Valid body closure. New BOS Level: {fractal.BosLevel:F5}");
                         sweptThisTick = true;
-                        sweepType = "BullishSweep";
+                            sweepType = "BullishSweepValid";
+                        }
+                        else
+                        {
+                            DebugLog($"[SWEEP_BULL_INVALID_CLOSURE] Low fractal {fractal.Level:F5} at {fractal.Time} wicked by M3 bar {currentM3Bar.OpenTime}, but bar closed AT or BELOW fractal (L: {currentM3Bar.Low:F5}, C: {currentM3Bar.Close:F5}). Invalidating sweep.");
+                            // Do not mark as swept, fractal remains available for future checks if price moves correctly later.
+                            // Or, optionally, mark as EntryDone = true to fully invalidate it if this pattern means it's broken.
+                            // For now, let's just not mark it as IsSwept.
+                        }
                     }
                 }
                 else if (trendContext == TrendContext.Bearish || TrendMode == ManualTrendMode.Bearish)
                 {
-                    if (currentM3Bar.High > fractal.Level)
+                    if (currentM3Bar.High > fractal.Level) // Wick swept the high fractal
                     {
+                        if (currentM3Bar.Close < fractal.Level) // Body closed back below the fractal
+                        {
+                            validSweepBodyClosure = true;
                         fractal.IsSwept = true;
-                        sweptThisTick = true;
-                        fractal.SweepLevel = fractal.Level;
-                        fractal.SweepExtreme = currentM3Bar.High;
-                        fractal.SweepBarIndex = m3Bars.Count - 2;
+                            fractal.SweepLevel = fractal.Level; // The H1 fractal level itself
+                            fractal.SweepExtreme = currentM3Bar.High; // The highest point of the M3 sweep bar
+                            fractal.SweepBarIndex = m3Bars.Count - 2; // Index of currentM3Bar
 
-                        fractal.BosLevel = currentM3Bar.Low;
+                            fractal.BosLevel = currentM3Bar.Low; // Potential BOS level is the low of the M3 sweep bar
                         fractal.LastBosCheckBarIndex = m3Bars.Count - 2;
 
-                        DebugLog($"[SWEEP_BEAR] High fractal {fractal.Level} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar H: {currentM3Bar.High}, L: {currentM3Bar.Low}. New BOS Level: {fractal.BosLevel}");
+                            DebugLog($"[SWEEP_BEAR_VALID] High fractal {fractal.Level:F5} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar H: {currentM3Bar.High:F5}, C: {currentM3Bar.Close:F5}, L: {currentM3Bar.Low:F5}. Valid body closure. New BOS Level: {fractal.BosLevel:F5}");
                         sweptThisTick = true;
-                        sweepType = "BearishSweep";
+                            sweepType = "BearishSweepValid";
+                        }
+                        else
+                        {
+                            DebugLog($"[SWEEP_BEAR_INVALID_CLOSURE] High fractal {fractal.Level:F5} at {fractal.Time} wicked by M3 bar {currentM3Bar.OpenTime}, but bar closed AT or ABOVE fractal (H: {currentM3Bar.High:F5}, C: {currentM3Bar.Close:F5}). Invalidating sweep.");
+                        }
                     }
                 }
 
-                if (sweptThisTick)
+                if (sweptThisTick && validSweepBodyClosure) // Log only if successfully swept with valid closure
                 {
-                    LogChartEvent(currentM3Bar.OpenTime, "SWEEP", price1: fractal.SweepLevel, price2: fractal.SweepExtreme, tradeType: sweepType, notes: $"Original fractal at {fractal.Time.ToString("HH:mm:ss")} level {fractal.Level.ToString(CultureInfo.InvariantCulture)}");
+                    LogChartEvent(currentM3Bar.OpenTime, "SWEEP_VALID", price1: fractal.SweepLevel, price2: fractal.SweepExtreme, tradeType: sweepType, notes: $"Original H1F {fractal.Level.ToString(CultureInfo.InvariantCulture)} @{fractal.Time:HH:mm}, M3 Sweep Bar C: {currentM3Bar.Close.ToString(CultureInfo.InvariantCulture)}, BOSLvl: {fractal.BosLevel?.ToString(CultureInfo.InvariantCulture) ?? "N/A"}");
                 }
             }
         }
@@ -1232,19 +1342,32 @@ namespace cAlgo.Robots
                     if (candidateBar.Close > fractal.BosLevel.Value)
                     {
                         double distanceToBosLevelPips = (candidateBar.Close - fractal.BosLevel.Value) / Symbol.PipSize;
-                        DebugLog($"[BOS_DEBUG_BULL] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close} vs BOS Level (SweepBarHigh): {fractal.BosLevel.Value}. Dist: {distanceToBosLevelPips:F1} pips.");
+                        DebugLog($"[BOS_DEBUG_BULL] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close:F5} vs BOS Level (SweepBarHigh): {fractal.BosLevel.Value:F5}. Dist to BOS Level: {distanceToBosLevelPips:F1} pips.");
 
                         if (distanceToBosLevelPips <= MaxBOSDistancePips)
+                        {
+                            // New Check: Distance from H1 Asian Fractal to Entry Price
+                            double distFromH1FractalToEntryPips = (candidateBar.Close - fractal.Level) / Symbol.PipSize;
+                            DebugLog($"[BOS_DEBUG_BULL_H1_DIST] Dist from H1 Asian Fractal ({fractal.Level:F5}) to Entry Price ({candidateBar.Close:F5}): {distFromH1FractalToEntryPips:F1} pips. Max Allowed: {MaxEntryToH1FractalDistancePips:F1} pips.");
+
+                            if (distFromH1FractalToEntryPips <= MaxEntryToH1FractalDistancePips)
                         {
                             result.IsBreak = true;
                             result.EntryPrice = candidateBar.Close;
                             result.BreakTime = candidateBar.OpenTime;
-                            DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} > BOS Level: {fractal.BosLevel.Value}. Entry at market.");
+                                DebugLog($"[BOS_SUCCESS_BULL] Bullish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close:F5} > BOS Level: {fractal.BosLevel.Value:F5}. Entry at market.");
                             return result;
                         }
                         else
                         {
-                            DebugLog($"[BOS_REJECT_BULL] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
+                                DebugLog($"[BOS_REJECT_BULL_H1_DIST] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance from H1 Fractal ({distFromH1FractalToEntryPips:F1} pips) > MaxEntryToH1FractalDistancePips ({MaxEntryToH1FractalDistancePips}). Fractal Level: {fractal.Level:F5}, Entry: {candidateBar.Close:F5}. Fractal invalidated.");
+                                fractal.EntryDone = true; // Invalidate fractal for future entries due to this rule
+                                return result;
+                            }
+                        }
+                        else
+                        {
+                            DebugLog($"[BOS_REJECT_BULL_BOS_DIST] Bullish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance to BOS Level {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value:F5}, Close: {candidateBar.Close:F5}. Fractal invalidated for future entries.");
                             fractal.EntryDone = true;
                             return result;
                         }
@@ -1255,19 +1378,32 @@ namespace cAlgo.Robots
                     if (candidateBar.Close < fractal.BosLevel.Value)
                     {
                         double distanceToBosLevelPips = (fractal.BosLevel.Value - candidateBar.Close) / Symbol.PipSize;
-                        DebugLog($"[BOS_DEBUG_BEAR] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close} vs BOS Level (SweepBarLow): {fractal.BosLevel.Value}. Dist: {distanceToBosLevelPips:F1} pips.");
+                        DebugLog($"[BOS_DEBUG_BEAR] Candidate Bar {candidateBar.OpenTime} C: {candidateBar.Close:F5} vs BOS Level (SweepBarLow): {fractal.BosLevel.Value:F5}. Dist to BOS Level: {distanceToBosLevelPips:F1} pips.");
                         
                         if (distanceToBosLevelPips <= MaxBOSDistancePips)
+                        {
+                            // New Check: Distance from H1 Asian Fractal to Entry Price
+                            double distFromH1FractalToEntryPips = (fractal.Level - candidateBar.Close) / Symbol.PipSize;
+                            DebugLog($"[BOS_DEBUG_BEAR_H1_DIST] Dist from H1 Asian Fractal ({fractal.Level:F5}) to Entry Price ({candidateBar.Close:F5}): {distFromH1FractalToEntryPips:F1} pips. Max Allowed: {MaxEntryToH1FractalDistancePips:F1} pips.");
+
+                            if (distFromH1FractalToEntryPips <= MaxEntryToH1FractalDistancePips)
                         {
                             result.IsBreak = true;
                             result.EntryPrice = candidateBar.Close;
                             result.BreakTime = candidateBar.OpenTime;
-                            DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close} < BOS Level: {fractal.BosLevel.Value}. Entry at market.");
+                                DebugLog($"[BOS_SUCCESS_BEAR] Bearish BOS Confirmed by M3 bar {candidateBar.OpenTime}. Close: {candidateBar.Close:F5} < BOS Level: {fractal.BosLevel.Value:F5}. Entry at market.");
                             return result;
                         }
                         else
                         {
-                             DebugLog($"[BOS_REJECT_BEAR] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value}, Close: {candidateBar.Close}. Fractal invalidated for future entries.");
+                                DebugLog($"[BOS_REJECT_BEAR_H1_DIST] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance from H1 Fractal ({distFromH1FractalToEntryPips:F1} pips) > MaxEntryToH1FractalDistancePips ({MaxEntryToH1FractalDistancePips}). Fractal Level: {fractal.Level:F5}, Entry: {candidateBar.Close:F5}. Fractal invalidated.");
+                                fractal.EntryDone = true; // Invalidate fractal for future entries due to this rule
+                                return result;
+                            }
+                        }
+                        else
+                        {
+                             DebugLog($"[BOS_REJECT_BEAR_BOS_DIST] Bearish BOS attempt on bar {candidateBar.OpenTime} rejected. Distance to BOS Level {distanceToBosLevelPips:F1} pips > MaxBOSDistancePips ({MaxBOSDistancePips}). BOS Level: {fractal.BosLevel.Value:F5}, Close: {candidateBar.Close:F5}. Fractal invalidated for future entries.");
                             fractal.EntryDone = true;
                             return result;
                         }

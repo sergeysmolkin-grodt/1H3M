@@ -42,14 +42,14 @@ namespace cAlgo.Robots
         [Parameter("Enable Manual Trend", DefaultValue = ManualTrendMode.Auto, Group = "Context")]
         public ManualTrendMode TrendMode { get; set; }
 
+        [Parameter("Enable Candle Counting", DefaultValue = true, Group = "Context")]
+        public bool EnableCandleCounting { get; set; }
+
         [Parameter("Trend Candle Lookback", DefaultValue = 25, MinValue = 5, Group = "Context")]
         public int TrendCandleLookback { get; set; }
 
         [Parameter("Trend Candle Threshold", DefaultValue = 5, MinValue = 1, Group = "Context")]
         public int TrendCandleThreshold { get; set; }
-
-        [Parameter("Enable Candle Counting", DefaultValue = true, Group = "Context")]
-        public bool EnableCandleCounting { get; set; }
 
         [Parameter("Enable Impulse Analysis", DefaultValue = true, Group = "Context")]
         public bool EnableImpulseAnalysis { get; set; }
@@ -63,8 +63,11 @@ namespace cAlgo.Robots
         [Parameter("Enable Structure Analysis", DefaultValue = true, Group = "Context")]
         public bool EnableStructureAnalysis { get; set; }
 
-        [Parameter("Structure Lookback (1H Bars to check?)", DefaultValue = 10, MinValue = 3, Group = "Context")]
+        [Parameter("Structure Lookback", DefaultValue = 10, MinValue = 3, Group = "Context")]
         public int StructureLookback { get; set; }
+
+        [Parameter("Structure Confirmation Count", DefaultValue = 2, MinValue = 1, Group = "Context")]
+        public int StructureConfirmationCount { get; set; }
         // --- Конец Контекст Параметры ---
 
         private const double _fixedRiskPercent = 1.0; // Fixed risk at 1%

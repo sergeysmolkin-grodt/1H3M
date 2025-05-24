@@ -7,6 +7,7 @@ using cAlgo.API;
 using cAlgo.API.Collections;
 using cAlgo.API.Indicators;
 using cAlgo.API.Internals;
+using System.Drawing;
 
 namespace cAlgo.Robots
 {
@@ -575,37 +576,106 @@ namespace cAlgo.Robots
 
             if (EnableStructureAnalysis && _h1Bars.Count >= StructureLookback + 1)
             {
-                double prevHigh = _h1Bars.HighPrices[last - StructureLookback];
-                double prevLow = _h1Bars.LowPrices[last - StructureLookback];
-                
-                for (int i = StructureLookback - 1; i >= 0; i--) 
+                DebugLog("[VIS_DEBUG] Entering structure analysis block.");
+                List<SwingPoint> swingHighs = new List<SwingPoint>();
+                List<SwingPoint> swingLows = new List<SwingPoint>();
+
+                // Step 1: Identify Swing Points within the StructureLookback window
+                // We need at least 2 bars to form a 2-bar pattern. Loop accordingly.
+                // The lookback window starts at 'last - StructureLookback + 1' and ends at 'last'.
+                // To form a 2-bar pattern (bar1, bar2), bar2 can be 'last'. So bar1 is 'last-1'.
+                // The first bar1 can be 'last - StructureLookback + 1'. So bar2 is 'last - StructureLookback + 2'.
+                // This means we need at least StructureLookback bars available to look for patterns in the last (StructureLookback-1) pairs.
+                // Corrected loop: Iterate to check pairs [i-1, i]
+                // i goes from (last - StructureLookback + 2) up to last. No, this is wrong.
+                // If StructureLookback = 10, we analyze bars from index 'last-9' to 'last'.
+                // A 2-bar pattern involves bar 'k' and 'k+1'.
+                // 'k' can go from 'last-StructureLookback+1' up to 'last-1'.
+
+                int firstBarIndexOfWindow = last - StructureLookback + 1;
+                if (firstBarIndexOfWindow < 0) firstBarIndexOfWindow = 0; // Should not happen due to initial check
+
+                for (int i = firstBarIndexOfWindow; i < last; i++) // i is the first bar of the 2-bar pattern
                 {
-                    int currentIndex = last - i;
-                    if (_h1Bars.HighPrices[currentIndex] > prevHigh)
+                    int bar1_idx = i;
+                    int bar2_idx = i + 1;
+
+                    // Ensure bar2_idx is within bounds (already covered by i < last)
+
+                    var open1 = _h1Bars.OpenPrices[bar1_idx];
+                    var close1 = _h1Bars.ClosePrices[bar1_idx];
+                    var high1 = _h1Bars.HighPrices[bar1_idx];
+                    var low1 = _h1Bars.LowPrices[bar1_idx];
+                    var time1 = _h1Bars.OpenTimes[bar1_idx];
+
+                    var open2 = _h1Bars.OpenPrices[bar2_idx];
+                    var close2 = _h1Bars.ClosePrices[bar2_idx];
+                    var high2 = _h1Bars.HighPrices[bar2_idx];
+                    var low2 = _h1Bars.LowPrices[bar2_idx];
+
+                    // Check for Swing High: Bar1 Bullish, Bar2 Bearish
+                    if (close1 > open1 && close2 < open2)
                     {
-                        hasHigherHighs = true;
+                        double swingHighPrice = Math.Max(high1, high2);
+                        swingHighs.Add(new SwingPoint { Price = swingHighPrice, Time = time1, IsHigh = true });
+                         DebugLog($"[VIS_DEBUG] Identified Swing High at {time1:dd.MM HH:mm} Price: {swingHighPrice:F5}");
                     }
-                    // Note: Original logic for LH might be slightly different if only one LH is needed.
-                    // This checks if *any* subsequent high is lower than a *previous* high in the sequence.
-                    // A more common definition of LH for downtrend would be current high < previous significant high.
-                    // For simplicity, this structure check might need refinement based on precise strategy.
-                    else if (_h1Bars.HighPrices[currentIndex] < prevHigh) 
+
+                    // Check for Swing Low: Bar1 Bearish, Bar2 Bullish
+                    if (close1 < open1 && close2 > open2)
                     {
-                        hasLowerHighs = true;
+                        double swingLowPrice = Math.Min(low1, low2);
+                        swingLows.Add(new SwingPoint { Price = swingLowPrice, Time = time1, IsHigh = false });
+                        DebugLog($"[VIS_DEBUG] Identified Swing Low at {time1:dd.MM HH:mm} Price: {swingLowPrice:F5}");
                     }
-                    
-                    if (_h1Bars.LowPrices[currentIndex] > prevLow)
-                    {                       
-                        hasHigherLows = true;
-                    }
-                    else if (_h1Bars.LowPrices[currentIndex] < prevLow)
-                    {
-                        hasLowerLows = true;
-                    }
-                    
-                    prevHigh = _h1Bars.HighPrices[currentIndex];
-                    prevLow = _h1Bars.LowPrices[currentIndex];
                 }
+                
+                // Step 2: Analyze sequences of these swing points
+                int hhCount = 0;
+                int hlCount = 0;
+                int llCount = 0;
+                int lhCount = 0;
+
+                if (swingHighs.Count >= 2)
+                {
+                    for (int j = 1; j < swingHighs.Count; j++)
+                    {
+                        if (swingHighs[j].Price > swingHighs[j-1].Price) hhCount++;
+                        else if (swingHighs[j].Price < swingHighs[j-1].Price) lhCount++;
+                    }
+                }
+
+                if (swingLows.Count >= 2)
+                {
+                    for (int j = 1; j < swingLows.Count; j++)
+                    {
+                        if (swingLows[j].Price > swingLows[j-1].Price) hlCount++;
+                        else if (swingLows[j].Price < swingLows[j-1].Price) llCount++;
+                    }
+                }
+                
+                DebugLog($"[VIS_DEBUG] Swing Analysis Counts: HH={hhCount}, HL={hlCount}, LL={llCount}, LH={lhCount} (Required: {StructureConfirmationCount})");
+
+                if (hhCount >= StructureConfirmationCount) hasHigherHighs = true;
+                if (hlCount >= StructureConfirmationCount) hasHigherLows = true;
+                if (llCount >= StructureConfirmationCount) hasLowerLows = true;
+                if (lhCount >= StructureConfirmationCount) hasLowerHighs = true; // Typo: should be hasLowerHighs
+
+                // Corrected Typo for LH:
+                if (lhCount >= StructureConfirmationCount) hasLowerHighs = true; 
+
+                // Visualization part (remains the same, uses the final hasHigherHighs etc. flags)
+                var structureAnalysisWindowStart = _h1Bars.OpenTimes[Math.Max(0, last - StructureLookback + 1)];
+                var structureAnalysisWindowEnd = _h1Bars.OpenTimes[last];
+
+                cAlgo.API.Color structureLineColor = cAlgo.API.Color.Gray;
+                if (hasHigherHighs && hasHigherLows) structureLineColor = cAlgo.API.Color.Green;
+                else if (hasLowerLows && hasLowerHighs) structureLineColor = cAlgo.API.Color.Red;
+                
+                DebugLog($"[VIS_DEBUG] Final Structure: HH={hasHigherHighs}, HL={hasHigherLows}, LL={hasLowerLows}, LH={hasLowerHighs}");
+                DebugLog($"[VIS_DEBUG] Drawing lines for window: Start={structureAnalysisWindowStart:dd.MM HH:mm}, End={structureAnalysisWindowEnd:dd.MM HH:mm}, Color={structureLineColor}");
+                
+                Chart.RemoveObject("StructureStartLine");
             }
             
             // Принятие решения о тренде
@@ -1309,6 +1379,14 @@ namespace cAlgo.Robots
         Auto,
         Bullish,
         Bearish
+    }
+
+    // Struct to hold swing point information
+    public struct SwingPoint
+    {
+        public DateTime Time { get; set; }
+        public double Price { get; set; }
+        public bool IsHigh { get; set; } // True for Swing High, False for Swing Low
     }
 } 
     

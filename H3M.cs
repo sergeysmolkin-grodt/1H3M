@@ -102,6 +102,10 @@ namespace cAlgo.Robots
         private string _csvFilePath;
         private static readonly string CSV_HEADER = "Timestamp;EventType;H1_Open;H1_High;H1_Low;H1_Close;Price1;Price2;TradeType;Notes";
 
+        // New fields for custom TXT robot log
+        private StreamWriter _robotLogWriter;
+        private string _robotLogFilePath;
+
         protected override void OnStart()
         {
             _fractals = Indicators.Fractals(Bars, FractalPeriod);
@@ -114,19 +118,48 @@ namespace cAlgo.Robots
             try
             {
                 DebugLog($"[INITIAL_SYMBOL_INFO] Symbol: {SymbolName}, PipSize: {Symbol.PipSize}, TickSize: {Symbol.TickSize}, Digits: {Symbol.Digits}, MinStopLossDistance: {Symbol.MinStopLossDistance}, MinTakeProfitDistance: {Symbol.MinTakeProfitDistance}");
+                Print("[OnStart_DEBUG] Attempting to set up loggers..."); // Verbose debug
                 string robotName = GetType().Name;
-                string logsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "cAlgo", "Robots", "Logs", robotName);
-                Directory.CreateDirectory(logsDirectory);
-                _csvFilePath = Path.Combine(logsDirectory, $"{robotName}_ChartData_{SymbolName.Replace("/", "")}_{Server.Time:yyyyMMddHHmmss}.csv");
                 
+                string logsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "cAlgo", "Robots", "Logs", robotName);
+                Print($"[OnStart_DEBUG] Target logs directory: {logsDirectory}"); // Verbose debug
+
+                Print("[OnStart_DEBUG] Attempting Directory.CreateDirectory..."); // Verbose debug
+                Directory.CreateDirectory(logsDirectory); 
+                Print("[OnStart_DEBUG] Directory.CreateDirectory completed (or directory already existed)."); // Verbose debug
+
+                // Path for CSV Chart Data
+                Print("[OnStart_DEBUG] Attempting to set up CSV logger..."); // Verbose debug
+                string csvFileName = $"{robotName}_ChartData_{SymbolName.Replace("/", "")}_{Server.Time:yyyyMMddHHmmss}.csv";
+                _csvFilePath = Path.Combine(logsDirectory, csvFileName);
                 _chartDataWriter = new StreamWriter(_csvFilePath, false, System.Text.Encoding.UTF8);
                 _chartDataWriter.WriteLine(CSV_HEADER);
-                Print($"Chart data logging started. File: {_csvFilePath}");
+                _chartDataWriter.Flush(); // Immediate flush after writing header
+                Print($"[OnStart_SUCCESS] Chart data CSV logging started. File: {_csvFilePath}");
+
+                // Path for TXT Robot Log
+                Print("[OnStart_DEBUG] Attempting to set up TXT logger..."); // Verbose debug
+                string robotLogFileName = $"{robotName}_RobotLog_{SymbolName.Replace("/", "")}_{Server.Time:yyyyMMddHHmmss}.txt";
+                _robotLogFilePath = Path.Combine(logsDirectory, robotLogFileName); 
+                _robotLogWriter = new StreamWriter(_robotLogFilePath, false, System.Text.Encoding.UTF8);
+                _robotLogWriter.WriteLine($"Robot log for {robotName} ({Symbol1Name}) started at {Server.Time:yyyy-MM-dd HH:mm:ss}");
+                _robotLogWriter.Flush(); // Immediate flush after writing initial line
+                Print($"[OnStart_SUCCESS] Custom robot TXT logging started. File: {_robotLogFilePath}");
+
             }
             catch (Exception ex)
             {
-                Print($"Error initializing chart data logger: {ex.Message}");
-                _chartDataWriter = null;
+                Print($"Error initializing chart data logger or robot TXT logger: {ex.Message}");
+                if (_chartDataWriter != null)
+                {
+                    _chartDataWriter.Close(); // Attempt to close if partially opened
+                    _chartDataWriter = null;
+                }
+                if (_robotLogWriter != null)
+                {
+                    _robotLogWriter.Close(); // Attempt to close if partially opened
+                    _robotLogWriter = null;
+                }
             }
         }
 
@@ -950,41 +983,37 @@ namespace cAlgo.Robots
 
         private void DebugLog(string message)
         {
-            // Выводить в консоль только сообщения, касающиеся определения контекста тренда,
-            // параметров исполняемой сделки или ошибки исполнения сделки.
-            // if (message.Contains("[DEBUG] Определен") ||      // Сообщения об определении контекста тренда
-            //     message.Contains("[PRE_EXECUTE_ORDER]") ||        // Попытка исполнить сделку с её параметрами
-            //     message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") || // Детали успешно открытой сделки до модификации SL/TP
-            //     message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") || // Детали успешно открытой сделки после модификации SL/TP
-            //     message.Contains("[TRADE_FAIL]"))                 // Сообщение о неудачной попытке открыть сделку
-            // {
-            //     Print(message); // Выводим сообщение в лог cTrader
-            // }
-            // Все остальные вызовы DebugLog с другими сообщениями будут проигнорированы (не будут выведены в консоль).
+            // For extensive debugging, print all messages passed to DebugLog.
+            Print(message); // Output to cTrader's log window and its log.txt
 
-            // Check if it's a trend context message
-            bool isTrendContextMessage = message.Contains("[DEBUG] Определен") ||
+            // Also write to our custom robot TXT log file
+            if (_robotLogWriter != null)
+            {
+                try
+                {
+                    _robotLogWriter.WriteLine($"[{Server.Time:yyyy-MM-dd HH:mm:ss.fff}] {message}");
+                }
+                catch (Exception ex)
+                {
+                    // Print error about custom logging to cTrader log, avoid recursive call to DebugLog
+                    Print($"ERROR writing to custom robot log file ({_robotLogFilePath}): {ex.Message} - Original message: {message}");
+                }
+            }
+
+            // Keep the logic for _lastTrendContextLogMessage if it's used elsewhere for printing before entry.
+            bool isMainTrendDeterminationMessage = message.Contains("[DEBUG] Определен") ||
                                          message.Contains("[DEBUG] Очевидный бычий тренд") ||
                                          message.Contains("[DEBUG] Очевидный медвежий тренд") ||
-                                         message.Contains("[DEBUG] Бычий контекст:") ||
-                                         message.Contains("[DEBUG] Медвежий контекст:") ||
-                                         message.Contains("[DEBUG] Bullish Context:") ||
-                                         message.Contains("[DEBUG] Bearish Context:") ||
-                                         message.Contains("[DEBUG] No Clear Trend Context");
+                                         message.Contains("[DEBUG] Бычий контекст:") || // These are from the old DetermineTrendContext
+                                         message.Contains("[DEBUG] Медвежий контекст:") ||// These are from the old DetermineTrendContext
+                                         message.Contains("[DEBUG] Bullish Context:") || // These are from the old DetermineTrendContext
+                                         message.Contains("[DEBUG] Bearish Context:") || // These are from the old DetermineTrendContext
+                                         message.Contains("[DEBUG] No Clear Trend Context"); // This is from the old DetermineTrendContext
 
-            if (isTrendContextMessage)
+            if (isMainTrendDeterminationMessage)
             {
-                _lastTrendContextLogMessage = message; // Store it, don't print immediately
+                _lastTrendContextLogMessage = message;
             }
-            // Check if it's one of the other types of messages that should be printed immediately
-            else if (message.Contains("[PRE_EXECUTE_ORDER]") ||
-                     message.Contains("[TRADE_OPEN_ACTUAL_PRE_MODIFY]") ||
-                     message.Contains("[TRADE_OPEN_ACTUAL_POST_MODIFY]") ||
-                     message.Contains("[TRADE_FAIL]"))
-            {
-                Print(message); // Print these immediately
-            }
-            // Any other message passed to DebugLog will not be printed, maintaining previous behavior for non-listed keywords.
         }
 
         protected override void OnTick()
@@ -1016,7 +1045,6 @@ namespace cAlgo.Robots
             // Общий разрешенный диапазон серверного времени: 06:00-11:59 UTC+0 (соответствует 09:00-14:59 UTC+3)
             if (!IsLondonOrFrankfurtSession(serverTime)) // serverTime - это Server.Time (UTC+0)
             {
-                DebugLog($"[SESSION_SKIP_FL] Торговля пропущена. Текущее время сервера {serverTime:HH:mm} (UTC+0). Это соответствует {serverTime.AddHours(3):HH:mm} UTC+3, что находится вне разрешенных торговых сессий: Франкфурт (09:00-10:00 UTC+3) и Лондон (10:00-15:00 UTC+3).");
                 return;
             }
 
@@ -1147,6 +1175,23 @@ namespace cAlgo.Robots
                 }
                 _chartDataWriter = null;
             }
+
+            // Close custom TXT robot log writer
+            if (_robotLogWriter != null)
+            {
+                try
+                {
+                    _robotLogWriter.WriteLine($"Robot log for {GetType().Name} ({SymbolName}) stopped at {Server.Time:yyyy-MM-dd HH:mm:ss}");
+                    _robotLogWriter.Flush();
+                    _robotLogWriter.Close();
+                    Print("Custom robot TXT logging stopped.");
+                }
+                catch (Exception ex)
+                {
+                    Print($"Error closing custom robot log file: {ex.Message}");
+                }
+                _robotLogWriter = null;
+            }
         }
 
         private void FindAsianSessionFractals(TrendContext trendContext)
@@ -1244,10 +1289,40 @@ namespace cAlgo.Robots
                             fractal.SweepExtreme = currentM3Bar.Low; // The lowest point of the M3 sweep bar
                             fractal.SweepBarIndex = m3Bars.Count - 2; // Index of currentM3Bar (which is m3Bars.Last(1))
 
-                            fractal.BosLevel = currentM3Bar.High; // Potential BOS level is the high of the M3 sweep bar
+                            // REMOVED: fractal.BosLevel = currentM3Bar.High; // Potential BOS level is the high of the M3 sweep bar
                         fractal.LastBosCheckBarIndex = m3Bars.Count - 2;
 
-                            DebugLog($"[SWEEP_BULL_VALID] Low fractal {fractal.Level:F5} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar L: {currentM3Bar.Low:F5}, C: {currentM3Bar.Close:F5}, H: {currentM3Bar.High:F5}. Valid body closure. New BOS Level: {fractal.BosLevel:F5}");
+                            // --- New BOS Level Determination Start ---
+                            double determinedBosLevelValueBullish = double.MinValue;
+                            bool bosLevelSuccessfullyDeterminedBullish = false;
+                            int sweepBarIdxBullish = fractal.SweepBarIndex.Value;
+                            DateTime sweepBarOpenTimeBullish = m3Bars.OpenTimes[sweepBarIdxBullish];
+
+                            for (int k = 0; k < sweepBarIdxBullish; k++)
+                            {
+                                if (m3Bars.OpenTimes[k] >= fractal.Time)
+                                {
+                                    if (m3Bars.HighPrices[k] > determinedBosLevelValueBullish)
+                                    {
+                                        determinedBosLevelValueBullish = m3Bars.HighPrices[k];
+                                        bosLevelSuccessfullyDeterminedBullish = true;
+                                    }
+                                }
+                            }
+
+                            if (bosLevelSuccessfullyDeterminedBullish)
+                            {
+                                fractal.BosLevel = determinedBosLevelValueBullish;
+                                DebugLog($"[SWEEP_BOS_CALC_SUCCESS_BULL] New BOS for H1 fractal {fractal.Level:F5} ({fractal.Time}) -> {fractal.BosLevel:F5}. Sweep bar: {sweepBarOpenTimeBullish}.");
+                            }
+                            else
+                            {
+                                fractal.BosLevel = null;
+                                DebugLog($"[SWEEP_BOS_CALC_FAIL_BULL] No BOS for H1 fractal {fractal.Level:F5} ({fractal.Time}). No M3 highs found before sweep bar {sweepBarOpenTimeBullish}.");
+                            }
+                            // --- New BOS Level Determination End ---
+                            
+                            DebugLog($"[SWEEP_BULL_VALID] Low fractal {fractal.Level:F5} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar L: {currentM3Bar.Low:F5}, C: {currentM3Bar.Close:F5}, H: {currentM3Bar.High:F5}. Valid body closure. New BOS Level: {fractal.BosLevel?.ToString("F5") ?? "N/A"}");
                         sweptThisTick = true;
                             sweepType = "BullishSweepValid";
                         }
@@ -1272,10 +1347,40 @@ namespace cAlgo.Robots
                             fractal.SweepExtreme = currentM3Bar.High; // The highest point of the M3 sweep bar
                             fractal.SweepBarIndex = m3Bars.Count - 2; // Index of currentM3Bar
 
-                            fractal.BosLevel = currentM3Bar.Low; // Potential BOS level is the low of the M3 sweep bar
+                            // REMOVED: fractal.BosLevel = currentM3Bar.Low; // Potential BOS level is the low of the M3 sweep bar
                         fractal.LastBosCheckBarIndex = m3Bars.Count - 2;
 
-                            DebugLog($"[SWEEP_BEAR_VALID] High fractal {fractal.Level:F5} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar H: {currentM3Bar.High:F5}, C: {currentM3Bar.Close:F5}, L: {currentM3Bar.Low:F5}. Valid body closure. New BOS Level: {fractal.BosLevel:F5}");
+                            // --- New BOS Level Determination Start ---
+                            double determinedBosLevelValueBearish = double.MaxValue;
+                            bool bosLevelSuccessfullyDeterminedBearish = false;
+                            int sweepBarIdxBearish = fractal.SweepBarIndex.Value;
+                            DateTime sweepBarOpenTimeBearish = m3Bars.OpenTimes[sweepBarIdxBearish];
+                            
+                            for (int k = 0; k < sweepBarIdxBearish; k++)
+                            {
+                                if (m3Bars.OpenTimes[k] >= fractal.Time)
+                                {
+                                    if (m3Bars.LowPrices[k] < determinedBosLevelValueBearish)
+                                    {
+                                        determinedBosLevelValueBearish = m3Bars.LowPrices[k];
+                                        bosLevelSuccessfullyDeterminedBearish = true;
+                                    }
+                                }
+                            }
+
+                            if (bosLevelSuccessfullyDeterminedBearish)
+                            {
+                                fractal.BosLevel = determinedBosLevelValueBearish;
+                                DebugLog($"[SWEEP_BOS_CALC_SUCCESS_BEAR] New BOS for H1 fractal {fractal.Level:F5} ({fractal.Time}) -> {fractal.BosLevel:F5}. Sweep bar: {sweepBarOpenTimeBearish}.");
+                            }
+                            else
+                            {
+                                fractal.BosLevel = null;
+                                DebugLog($"[SWEEP_BOS_CALC_FAIL_BEAR] No BOS for H1 fractal {fractal.Level:F5} ({fractal.Time}). No M3 lows found before sweep bar {sweepBarOpenTimeBearish}.");
+                            }
+                            // --- New BOS Level Determination End ---
+
+                            DebugLog($"[SWEEP_BEAR_VALID] High fractal {fractal.Level:F5} at {fractal.Time} swept by M3 bar {currentM3Bar.OpenTime}. Bar H: {currentM3Bar.High:F5}, C: {currentM3Bar.Close:F5}, L: {currentM3Bar.Low:F5}. Valid body closure. New BOS Level: {fractal.BosLevel?.ToString("F5") ?? "N/A"}");
                         sweptThisTick = true;
                             sweepType = "BearishSweepValid";
                         }
